@@ -698,10 +698,13 @@ def color_signal(val):
         return "background-color: #3d0000; color: #ff9999"
     return ""
 
+
+
 st.dataframe(
-    display_df.style.applymap(color_signal, subset=[c for c in ["signal", "final_score"] if c in display_df.columns]),
+    display_df.style.map(color_signal, subset=[c for c in ["signal", "final_score"] if c in display_df.columns]),
     use_container_width=True,
 )
+
 
 # Export
 csv_data = view.to_csv(index=False).encode("utf-8")
@@ -737,7 +740,7 @@ breakdown_data = {
 }
 bd_df = pd.DataFrame(breakdown_data)
 bd_df["Status"] = bd_df["Skor"].apply(factor_label)
-st.dataframe(bd_df.style.applymap(color_signal, subset=["Skor"]), use_container_width=True)
+st.dataframe(bd_df.style.map(color_signal, subset=["Skor"]), use_container_width=True)
 
 # ── DETAILED ANALYSIS ──
 analysis = generate_detailed_analysis(selected_row, combined, market_regime)
