@@ -1,11 +1,10 @@
-# Saham BEI Screener (4 File)
+# Saham BEI Screener v3
 
-Aplikasi ini sekarang fokus ke mode ringkas:
+Aplikasi ini menggabungkan:
 
-- Hanya pakai 4 file data BEI
-- Tanpa orderbook
-- Tanpa broksum manual
-- Tanpa input fundamental manual
+- Scoring BEI dari file upload (1-5 hari)
+- Data teknikal TradingView (scanner)
+- Narasi otomatis dengan OpenRouter (opsional, pakai API key)
 
 ## Data yang dibutuhkan
 
@@ -24,6 +23,31 @@ python3 -m pip install --user -r requirements.txt
 python3 -m streamlit run app.py
 ```
 
+Lalu buka di browser:
+
+```bash
+http://localhost:8501
+```
+
+Untuk fitur AI narasi, isi OpenRouter API key di sidebar (didapat dari OpenRouter).
+
+Jika ingin tanpa ketik manual, set API key statis lewat secrets atau environment variable:
+
+```toml
+# .streamlit/secrets.toml
+OPENROUTER_API_KEY = "sk-or-v1-..."
+OPENROUTER_MODEL = "openrouter/auto"
+```
+
+Atau via environment variable:
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."
+export OPENROUTER_MODEL="openrouter/auto"
+```
+
+Jika key statis tersedia, app otomatis memakainya di sidebar.
+
 ## Catatan format
 
 - `Ringkasan Saham` mengikuti kolom IDX harian.
@@ -32,9 +56,17 @@ python3 -m streamlit run app.py
   - Utama: `Kode`, `Nama Perusahaan`, `Tanggal Pencatatan`, `Saham`, `Papan Pencatatan`
   - Alternatif: `ID Instrument`, `ID Board`, `Volume`, `Nilai`, `Frekuensi`
 
-## Formula skor
+## Formula skor inti
 
-- `Final Score = 0.30 * Momentum + 0.30 * Likuiditas + 0.20 * Flow + 0.15 * Market Activity + 0.05 * Broker`
+Final score menggunakan bobot yang bisa diubah di sidebar, default:
+
+- Momentum: 25%
+- Likuiditas: 20%
+- Flow: 20%
+- Market Activity: 15%
+- Volume Trend: 10%
+- Price Structure: 5%
+- Broker: 5%
 
 Jika `Ringkasan Indeks` diupload:
 
@@ -63,6 +95,8 @@ Kategori:
 - `Tinggi`
 - `Sangat Tinggi`
 
-## Rencana tambahan
+## Catatan penting
 
-Jika ingin ditambah nanti, file `Ringkasan Indeks` bisa dijadikan modul tambahan untuk filter kondisi market (misalnya risk-on/risk-off).
+- Data TradingView dan OpenRouter tergantung koneksi internet.
+- Jika TradingView gagal diambil, app tetap jalan dengan analisis BEI saja.
+- Output AI bersifat asisten analisis, bukan rekomendasi investasi final.
