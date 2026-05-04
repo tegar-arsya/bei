@@ -423,13 +423,13 @@ Target 450-650 kata.
 """
 
 @st.cache_data(ttl=600, show_spinner=False)
-def call_openrouter(prompt, api_key, model):
+def call_openrouter(prompt, api_key, model, max_tokens=1200):
     url = "https://openrouter.ai/api/v1/chat/completions"
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.35,
-        "max_tokens": 1200,
+        "max_tokens": max_tokens,
         "top_p": 0.85,
     }
     headers = {
@@ -518,6 +518,20 @@ def ratio_text(value, suffix="x"):
         if pd.isna(v) or np.isinf(v):
             return "N/A"
         return f"{v:.2f}{suffix}"
+    except Exception:
+        return "N/A"
+
+
+def price_text(value):
+    try:
+        v = float(value)
+        if pd.isna(v) or np.isinf(v):
+            return "N/A"
+        if abs(v) >= 100:
+            return f"{v:,.2f}"
+        if abs(v) >= 1:
+            return f"{v:,.4f}"
+        return f"{v:,.8g}"
     except Exception:
         return "N/A"
 
@@ -1295,6 +1309,291 @@ def get_pair_risk_breakdown(row):
     return pd.DataFrame(items)
 
 
+def range_position_pct(last, low, high):
+    last = safe_num(last, np.nan)
+    low = safe_num(low, np.nan)
+    high = safe_num(high, np.nan)
+    if pd.isna(last) or pd.isna(low) or pd.isna(high) or high <= low:
+        return np.nan
+    return float(np.clip((last - low) / (high - low) * 100, 0, 100))
+
+
+def pct_distance(value, reference):
+    value = safe_num(value, np.nan)
+    reference = safe_num(reference, np.nan)
+    if pd.isna(value) or pd.isna(reference) or reference == 0:
+        return np.nan
+    return (value / reference - 1) * 100
+
+
+def crypto_volume_label(row):
+    volume = safe_num(row.get("quote_volume"), 0)
+    if volume >= 1_000_000_000:
+        return "Sangat tebal"
+    if volume >= 100_000_000:
+        return "Tebal"
+    if volume >= 10_000_000:
+        return "Cukup aktif"
+    if volume >= 1_000_000:
+        return "Tipis-menengah"
+    return "Tipis"
+
+
+def build_crypto_forward_analysis(row):
+    last = safe_num(row.get("last_price"), np.nan)
+    open_24h = safe_num(row.get("open_24h"), np.nan)
+    high = safe_num(row.get("high_24h"), np.nan)
+    low = safe_num(row.get("low_24h"), np.nan)
+    weighted = safe_num(row.get("weighted_avg"), np.nan)
+    change = safe_num(row.get("change_24h_pct"), 0)
+    score = safe_num(row.get("crypto_score"), 0)
+    liquidity = safe_num(row.get("liquidity_score"), 50)
+    momentum = safe_num(row.get("momentum_score"), 50)
+    activity = safe_num(row.get("activity_score"), 50)
+    pos = range_position_pct(last, low, high)
+    range_pct = pct_distance(high, low)
+    from_high = pct_distance(last, high)
+    from_low = pct_distance(last, low)
+
+    forward_score = score * 0.45 + momentum * 0.25 + liquidity * 0.20 + activity * 0.10
+    if change < -2:
+        forward_score -= min(abs(change) * 1.2, 25)
+    elif change > 18:
+        forward_score -= min((change - 18) * 0.6, 10)
+    if not pd.isna(pos):
+        if pos >= 65 and change > 0:
+            forward_score += 5
+        elif pos <= 25 and change < 0:
+            forward_score -= 7
+    forward_score = float(np.clip(forward_score, 0, 100))
+
+    if change <= -8:
+        verdict = "WAIT / DEFENSIVE"
+        state = "Tekanan jual 24h masih dominan."
+        short_bias = "Rebound baru lebih sehat kalau harga bisa reclaim area open/average dan volume beli muncul."
+    elif change >= 12 and score >= 70:
+        verdict = "MOMENTUM - JANGAN CHASE"
+        state = "Momentum kuat, tetapi sudah ekspansif dalam 24 jam."
+        short_bias = "Peluang lanjut ada, namun entry paling aman menunggu retest atau candle baru yang tidak ditolak."
+    elif change >= 4 and score >= 60:
+        verdict = "WATCH MOMENTUM"
+        state = "Trend pendek positif dengan volume cukup mendukung."
+        short_bias = "Bias masih naik selama harga bertahan di separuh atas range 24h."
+    elif score >= 70:
+        verdict = "WATCH BREAKOUT"
+        state = "Likuiditas dan aktivitas bagus, arah harga belum sekuat skornya."
+        short_bias = "Tunggu breakout high 24h atau pullback ringan yang cepat dibeli."
+    elif score < 45:
+        verdict = "LOW PRIORITY"
+        state = "Data belum menunjukkan kombinasi momentum dan aktivitas yang kuat."
+        short_bias = "Lebih baik tunggu volume dan arah harga lebih jelas."
+    else:
+        verdict = "NETRAL / WAIT"
+        state = "Setup belum buruk, tapi konfirmasi lanjutan masih kurang."
+        short_bias = "Gunakan area range 24h sebagai peta tunggu, bukan alasan mengejar candle."
+
+    support_candidates = [weighted, open_24h, low]
+    support = next((x for x in support_candidates if not pd.isna(x) and x > 0), np.nan)
+    support_label = price_text(support)
+    high_label = price_text(high)
+    low_label = price_text(low)
+
+    metrics = pd.DataFrame([
+        {"Metric": "Forward Score", "Value": f"{forward_score:.1f}/100", "Bacaan": "Kualitas setup ke depan dari momentum, volume, aktivitas, dan posisi range."},
+        {"Metric": "Range 24h", "Value": pct_text(range_pct), "Bacaan": "Makin lebar, makin besar risiko whipsaw dan entry terlambat."},
+        {"Metric": "Posisi di range 24h", "Value": f"{pos:.1f}%" if not pd.isna(pos) else "N/A", "Bacaan": "Di atas 60% berarti buyer masih menjaga area atas; di bawah 40% mulai lemah."},
+        {"Metric": "Jarak dari high", "Value": pct_text(from_high), "Bacaan": "Dekat high cocok untuk breakout watch, tapi rawan rejection."},
+        {"Metric": "Pantulan dari low", "Value": pct_text(from_low), "Bacaan": "Pantulan besar tanpa volume lanjutan sering berubah jadi pullback."},
+        {"Metric": "Kualitas volume", "Value": crypto_volume_label(row), "Bacaan": f"Quote volume 24h {format_compact(row.get('quote_volume'), '$')}."},
+    ])
+
+    outlook = pd.DataFrame([
+        {"Horizon": "1-4 jam", "Bias": short_bias, "Yang Dipantau": f"Reaksi harga terhadap support {support_label} dan high 24h {high_label}."},
+        {"Horizon": "24 jam", "Bias": state, "Yang Dipantau": "Apakah change 24h bertahan positif sambil volume tetap masuk, bukan hanya spike pendek."},
+        {"Horizon": "3-7 hari", "Bias": "Masuk watchlist kalau score tetap tinggi di beberapa snapshot.", "Yang Dipantau": "Simpan snapshot harian; cari score stabil, volume stabil, dan pullback yang tidak merusak struktur."},
+    ])
+
+    scenarios = pd.DataFrame([
+        {
+            "Skenario": "Bullish lanjut",
+            "Trigger": f"Break/retest high 24h {high_label}, posisi range tetap >60%, volume tidak mengering.",
+            "Respons": "Boleh cari entry kecil bertahap; hindari all-in saat candle sudah terlalu jauh.",
+        },
+        {
+            "Skenario": "Base / tunggu",
+            "Trigger": f"Harga bergerak di antara support {support_label} dan high {high_label}, score tetap bagus.",
+            "Respons": "Tunggu arah baru. Pullback ringan lebih sehat daripada mengejar pucuk range.",
+        },
+        {
+            "Skenario": "Bearish / batal",
+            "Trigger": f"Gagal bertahan di support {support_label} atau kembali mendekati low 24h {low_label}.",
+            "Respons": "Setup batal untuk momentum. Review ulang setelah volume beli muncul lagi.",
+        },
+    ])
+
+    checklist = [
+        f"Breakout valid jika harga tidak langsung ditolak dari high 24h {high_label}.",
+        f"Invalidasi awal ada di area {support_label}; invalidasi keras dekat low 24h {low_label}.",
+        "Untuk entry receh, gunakan posisi kecil dulu dan tambah hanya kalau skenario bullish benar-benar aktif.",
+        "Review ulang setelah snapshot berikutnya, terutama jika score turun atau volume 24h mulai melemah.",
+    ]
+
+    return {
+        "verdict": verdict,
+        "state": state,
+        "forward_score": forward_score,
+        "metrics": metrics,
+        "outlook": outlook,
+        "scenarios": scenarios,
+        "checklist": checklist,
+    }
+
+
+def meme_flow_label(row):
+    buy_m5 = safe_num(row.get("buy_ratio_m5"), np.nan)
+    buy_h1 = safe_num(row.get("buy_ratio_h1"), np.nan)
+    chg_m5 = safe_num(row.get("change_m5_pct"), 0)
+    chg_h1 = safe_num(row.get("change_h1_pct"), 0)
+    if not pd.isna(buy_m5) and not pd.isna(buy_h1) and buy_m5 >= 0.58 and buy_h1 >= 0.55 and chg_m5 >= 0:
+        return "Buyer masih dominan di window pendek."
+    if not pd.isna(buy_h1) and buy_h1 < 0.40:
+        return "Sell pressure dominan; rawan distribusi."
+    if chg_m5 < 0 and chg_h1 > 0:
+        return "Momentum 1h masih hijau, tapi 5m mulai cooling off."
+    if chg_h1 < -15:
+        return "Dump 1h sedang aktif."
+    return "Flow campuran; tunggu konfirmasi window berikutnya."
+
+
+def build_meme_forward_analysis(row):
+    radar = safe_num(row.get("radar_score"), 0)
+    risk = safe_num(row.get("risk_score"), 100)
+    liquidity = safe_num(row.get("liquidity_usd"), 0)
+    liquidity_score = safe_num(row.get("liquidity_score"), 50)
+    volume_score = safe_num(row.get("volume_score"), 50)
+    buy_score = safe_num(row.get("buy_score"), 50)
+    age_score = safe_num(row.get("age_score"), 50)
+    age = safe_num(row.get("age_minutes"), np.nan)
+    chg_m5 = safe_num(row.get("change_m5_pct"), 0)
+    chg_h1 = safe_num(row.get("change_h1_pct"), 0)
+    chg_h6 = safe_num(row.get("change_h6_pct"), 0)
+    chg_h24 = safe_num(row.get("change_h24_pct"), 0)
+    buy_m5 = safe_num(row.get("buy_ratio_m5"), np.nan)
+    buy_h1 = safe_num(row.get("buy_ratio_h1"), np.nan)
+    vol_liq_h1 = safe_num(row.get("volume_liq_h1"), np.nan)
+    fdv_liq = safe_num(row.get("fdv_liq_ratio"), np.nan)
+
+    quality_score = (
+        radar * 0.55 +
+        liquidity_score * 0.15 +
+        volume_score * 0.10 +
+        buy_score * 0.10 +
+        age_score * 0.10 -
+        risk * 0.45
+    )
+    if liquidity < 5_000:
+        quality_score -= 20
+    elif liquidity < 25_000:
+        quality_score -= 8
+    if not pd.isna(fdv_liq) and fdv_liq > 150:
+        quality_score -= 10
+    if not pd.isna(vol_liq_h1) and vol_liq_h1 > 5:
+        quality_score -= 8
+    quality_score = float(np.clip(quality_score, 0, 100))
+
+    if risk >= 75 or liquidity < 5_000:
+        verdict = "AVOID"
+        state = "Risk terlalu dominan dibanding peluang."
+    elif risk >= 55 or liquidity < 25_000:
+        verdict = "WATCH ONLY"
+        state = "Masih spekulatif, slippage dan exit risk perlu dianggap besar."
+    elif chg_h1 >= 20 and not pd.isna(buy_h1) and buy_h1 >= 0.55 and radar >= 65:
+        verdict = "SPECULATIVE MOMENTUM"
+        state = "Momentum pendek kuat, tetap risk-first karena ini pair DEX."
+    elif chg_h1 <= -20 or (not pd.isna(buy_h1) and buy_h1 < 0.35):
+        verdict = "WAIT / DISTRIBUSI"
+        state = "Tekanan jual lebih penting daripada radar score."
+    elif radar >= 65 and risk < 55:
+        verdict = "WATCH"
+        state = "Ada aktivitas yang layak dipantau, tapi butuh refresh data."
+    else:
+        verdict = "LOW PRIORITY"
+        state = "Belum ada keunggulan data yang jelas."
+
+    if chg_m5 >= 0 and chg_h1 >= 0 and not pd.isna(buy_m5) and buy_m5 >= 0.55:
+        short_bias = "Buyer masih memegang window 5m-1h; pantau apakah volume lanjut, bukan hanya spike."
+    elif chg_m5 < 0 and chg_h1 > 0:
+        short_bias = "Momentum mulai mendingin; tunggu retest atau buyer masuk lagi."
+    elif chg_h1 < 0:
+        short_bias = "Window pendek negatif; entry baru perlu konfirmasi reversal."
+    else:
+        short_bias = "Window pendek belum tegas; jangan ambil keputusan dari satu metrik saja."
+
+    if risk >= 55:
+        day_bias = "24 jam ke depan harus fokus bertahan hidup: risk, liquidity, dan sell pressure lebih penting dari pump."
+    elif chg_h6 >= 0 and chg_h24 >= 0 and radar >= 65:
+        day_bias = "Jika flow tetap hijau setelah beberapa refresh, pair bisa masuk watchlist spekulatif."
+    else:
+        day_bias = "Butuh bukti volume dan buy ratio tetap sehat sebelum dianggap punya lanjutan."
+
+    if pd.isna(age) or age < 240:
+        multi_day_bias = "Masih terlalu muda; analisis 2-3 hari sangat bergantung pada holder, lock liquidity, tax, dan security check."
+    elif risk < 55 and liquidity >= 25_000:
+        multi_day_bias = "Bisa dipantau beberapa hari kalau liquidity tidak turun dan social/holder makin kuat."
+    else:
+        multi_day_bias = "Jangan diperlakukan seperti posisi panjang sampai data kontrak dan liquidity lebih jelas."
+
+    metrics = pd.DataFrame([
+        {"Metric": "Verdict", "Value": verdict, "Bacaan": state},
+        {"Metric": "Forward Quality", "Value": f"{quality_score:.1f}/100", "Bacaan": "Skor gabungan radar dikurangi risk dan kelemahan liquidity."},
+        {"Metric": "Flow", "Value": meme_flow_label(row), "Bacaan": f"Buy ratio 5m/1h: {safe_num(buy_m5, 0.5) * 100:.1f}% / {safe_num(buy_h1, 0.5) * 100:.1f}%."},
+        {"Metric": "Liquidity Risk", "Value": format_compact(liquidity, "$"), "Bacaan": "Di bawah $25K rawan slippage dan exit susah."},
+        {"Metric": "FDV/Liquidity", "Value": ratio_text(fdv_liq), "Bacaan": "Rasio tinggi berarti valuasi mudah digerakkan oleh likuiditas kecil."},
+        {"Metric": "Volume/Liquidity 1h", "Value": ratio_text(vol_liq_h1), "Bacaan": "Terlalu tinggi bisa berarti hype kuat atau wash/trap yang perlu dicurigai."},
+    ])
+
+    outlook = pd.DataFrame([
+        {"Horizon": "15m-1h", "Bias": short_bias, "Yang Dipantau": "Buy ratio 5m/1h, change 5m, dan txns baru saat refresh."},
+        {"Horizon": "24 jam", "Bias": day_bias, "Yang Dipantau": "Liquidity tidak turun tajam, risk score tidak memburuk, volume tetap organik."},
+        {"Horizon": "2-3 hari", "Bias": multi_day_bias, "Yang Dipantau": "Holder, tax/honeypot, liquidity lock, creator wallet, dan konsistensi social."},
+    ])
+
+    scenarios = pd.DataFrame([
+        {
+            "Skenario": "Lanjut pump",
+            "Trigger": "Buy ratio 5m/1h tetap >55%, change 5m tidak cepat merah, volume naik saat refresh.",
+            "Respons": "Hanya spekulatif kecil; scale out lebih cepat saat candle memanjang.",
+        },
+        {
+            "Skenario": "Cooling off",
+            "Trigger": "Change 5m merah, buy ratio turun <50%, volume melemah setelah spike.",
+            "Respons": "Wait. Jangan average down; tunggu data baru lebih bersih.",
+        },
+        {
+            "Skenario": "Dump / rug risk",
+            "Trigger": "Liquidity turun, sell pressure dominan, security flag muncul, atau risk score naik.",
+            "Respons": "Avoid atau keluar sesuai rencana risiko. Jangan tunggu narasi social.",
+        },
+    ])
+
+    checklist = [
+        "Run Security Check sebelum AI atau sebelum entry manual.",
+        "Cek holder, top wallet, tax buy/sell, honeypot, liquidity lock, dan creator wallet di explorer.",
+        "Refresh snapshot 15-60 menit kemudian; meme coin yang sehat biasanya tidak hanya bagus di satu tarikan data.",
+        "Untuk modal kecil, risiko utama bukan salah arah saja, tapi tidak bisa keluar karena liquidity tipis.",
+    ]
+
+    return {
+        "verdict": verdict,
+        "state": state,
+        "quality_score": quality_score,
+        "metrics": metrics,
+        "outlook": outlook,
+        "scenarios": scenarios,
+        "checklist": checklist,
+    }
+
+
 def risk_bool(value):
     if isinstance(value, bool):
         return value
@@ -1651,7 +1950,8 @@ def refresh_watchlist_snapshot(run_security=False):
 
 
 def build_crypto_market_prompt(row):
-    return f"""Kamu analis crypto untuk trader retail modal kecil. Tulis ringkasan praktis dalam bahasa Indonesia, bukan rekomendasi finansial.
+    forward = build_crypto_forward_analysis(row)
+    return f"""Kamu analis crypto untuk trader retail modal kecil. Tulis analisis detail dalam bahasa Indonesia, bukan rekomendasi finansial.
 
 DATA MARKET:
 - Symbol: {row.get("symbol")} ({row.get("base")})
@@ -1662,19 +1962,31 @@ DATA MARKET:
 - Trade count 24h: {format_compact(row.get("trade_count"))}
 - Score: {safe_num(row.get("crypto_score"), 0):.1f}/100
 - Signal: {row.get("signal")}
+- Forward verdict: {forward["verdict"]}
+- Forward score: {forward["forward_score"]:.1f}/100
+- Kondisi sekarang: {forward["state"]}
 
 FORMAT:
-**Verdict:** 1 kalimat.
-**Momentum:** 2-3 poin.
-**Risiko:** 2-3 poin.
-**Plan receh:** entry condition, stop invalidasi, take profit bertahap.
-**Kapan wait:** kondisi yang membuat setup batal.
+**Verdict:** [MOMENTUM | WATCH | WAIT | AVOID] + 1 kalimat alasan.
+**Kondisi Sekarang:** 4-6 poin, jelaskan momentum, volume, posisi range, dan apakah rawan chase.
+**Analisis Ke Depan:**
+- 1-4 jam:
+- 24 jam:
+- 3-7 hari:
+**Scenario Map:**
+- Bullish lanjut: trigger, cara respons, risiko.
+- Base / tunggu: trigger, cara respons.
+- Bearish / batal: trigger invalidasi, cara respons.
+**Level Praktis:** area breakout, support/invalidasi, dan take profit bertahap. Jika level tidak cukup kuat dari data, bilang "butuh chart manual".
+**Risk Plan Modal Kecil:** ukuran posisi, stop, kapan tidak entry, dan kapan review ulang.
+**Kesimpulan Simpel:** format "Kalau X, maka Y. Kalau Z, wait."
 
-Jaga bahasa singkat dan tegas. Jangan menjanjikan cuan."""
+Jaga bahasa tegas, detail, dan tidak membingungkan. Jangan menjanjikan cuan. Target 650-900 kata."""
 
 
 def build_meme_prompt(row, security=None):
     flags = "; ".join(get_pair_flags(row))
+    forward = build_meme_forward_analysis(row)
     security_sec = "SECURITY API: Belum dijalankan."
     if security:
         sec_flags = "; ".join([f"{level}: {text}" for level, text in security.get("flags", [])]) or "Tidak ada flag besar."
@@ -1684,7 +1996,7 @@ def build_meme_prompt(row, security=None):
             f"- Provider: {', '.join(security.get('statuses', [])) or 'N/A'}\n"
             f"- Flags: {sec_flags}"
         )
-    return f"""Kamu analis meme coin on-chain. Fokus ke risk-first screening untuk trader modal kecil. Tulis bahasa Indonesia.
+    return f"""Kamu analis meme coin on-chain. Fokus ke risk-first screening untuk trader modal kecil. Tulis analisis detail bahasa Indonesia.
 
 DATA PAIR:
 - Pair: {row.get("pair")} di {row.get("chain")} / {row.get("dex")}
@@ -1705,17 +2017,29 @@ DATA PAIR:
 - Radar score: {safe_num(row.get("radar_score"), 0):.1f}/100
 - Risk score: {safe_num(row.get("risk_score"), 0):.1f}/100 ({row.get("risk_label")})
 - Flags: {flags}
+- Forward verdict: {forward["verdict"]}
+- Forward quality: {forward["quality_score"]:.1f}/100
+- Kondisi sekarang: {forward["state"]}
 
 {security_sec}
 
 FORMAT:
 **Verdict:** [AVOID | WATCH | SPECULATIVE ONLY]
-**Kenapa menarik:** maksimal 3 poin.
-**Red flag:** maksimal 4 poin.
-**Plan receh:** ukuran posisi, invalidasi, take profit, dan jangan average down.
-**Data yang wajib dicek manual:** contract, holder, tax/honeypot, liquidity lock.
+**Kondisi Sekarang:** 4-6 poin, pisahkan momentum, flow buyer/seller, liquidity, age, FDV/liquidity.
+**Analisis Ke Depan:**
+- 15m-1h:
+- 24 jam:
+- 2-3 hari:
+**Scenario Map:**
+- Lanjut pump: trigger valid dan respons.
+- Cooling off: trigger wait.
+- Dump/rug risk: trigger bahaya dan respons.
+**Red Flag:** maksimal 6 poin, urutkan dari paling bahaya.
+**Plan Receh Risk-First:** ukuran posisi, invalidasi, take profit bertahap, dan aturan jangan average down.
+**Data Wajib Cek Manual:** contract, holder/top wallet, tax/honeypot, liquidity lock, creator wallet, social.
+**Kesimpulan Simpel:** format "Masuk hanya kalau X. Hindari kalau Y."
 
-Jangan menjanjikan cuan. Kalau data risk tinggi, bilang tegas."""
+Jangan menjanjikan cuan. Kalau data risk tinggi, bilang tegas. Target 750-1000 kata."""
 
 
 def render_openrouter_controls(prefix):
@@ -1880,7 +2204,8 @@ def render_crypto_market_page():
     with cta3:
         st.caption("Watchlist dan history disimpan lokal di folder data/.")
 
-    tab_summary, tab_chart, tab_ai = st.tabs(["Ringkasan", "Chart", "AI"])
+    crypto_outlook = build_crypto_forward_analysis(sel)
+    tab_summary, tab_outlook, tab_chart, tab_ai = st.tabs(["Ringkasan", "Outlook", "Chart", "AI"])
     with tab_summary:
         st.dataframe(pd.DataFrame({
             "Metric": ["Open 24h", "High 24h", "Low 24h", "Weighted Avg", "Liquidity Score", "Momentum Score", "Activity Score"],
@@ -1892,6 +2217,19 @@ def render_crypto_market_page():
                 f"{safe_num(sel.get('activity_score'), 0):.1f}",
             ],
         }), width="stretch")
+    with tab_outlook:
+        o1, o2, o3 = st.columns(3)
+        o1.metric("Forward Score", f"{crypto_outlook['forward_score']:.1f}/100")
+        o2.metric("Verdict", crypto_outlook["verdict"])
+        o3.metric("Signal", str(sel.get("signal", "N/A")))
+        st.markdown("**Bacaan Detail**")
+        st.dataframe(crypto_outlook["metrics"], width="stretch")
+        st.markdown("**Analisis Ke Depan**")
+        st.dataframe(crypto_outlook["outlook"], width="stretch")
+        st.markdown("**Scenario Map**")
+        st.dataframe(crypto_outlook["scenarios"], width="stretch")
+        st.markdown("**Checklist Praktis**")
+        st.markdown("\n".join(f"- {item}" for item in crypto_outlook["checklist"]))
     with tab_chart:
         tv_sym = f"BINANCE:{selected_symbol}" if sel.get("source") == "Binance" else f"CRYPTO:{selected_symbol}"
         components.html(f"""<div class="tradingview-widget-container" style="height:560px;width:100%;">
@@ -1904,7 +2242,7 @@ def render_crypto_market_page():
             st.warning("Masukkan OpenRouter API Key di sidebar untuk AI.")
         elif st.button("Generate Analisis AI", width="stretch"):
             with st.spinner("OpenRouter menganalisis crypto..."):
-                st.markdown(call_openrouter(build_crypto_market_prompt(sel), openrouter_key, llm_model))
+                st.markdown(call_openrouter(build_crypto_market_prompt(sel), openrouter_key, llm_model, max_tokens=1800))
             st.caption("Output AI adalah alat bantu analisis, bukan rekomendasi investasi.")
 
 
@@ -2025,8 +2363,9 @@ def render_meme_coin_page():
     with cta4:
         st.caption("Security check dipanggil untuk pair terpilih supaya rate limit API gratis tetap aman.")
 
-    tab_overview, tab_flow, tab_liquidity, tab_links, tab_addresses, tab_risk, tab_security, tab_history, tab_ai = st.tabs([
-        "Overview", "Flow", "Liquidity", "Links", "Addresses", "Risk", "Security", "History", "AI"
+    meme_outlook = build_meme_forward_analysis(sel)
+    tab_overview, tab_outlook, tab_flow, tab_liquidity, tab_links, tab_addresses, tab_risk, tab_security, tab_history, tab_ai = st.tabs([
+        "Overview", "Outlook", "Flow", "Liquidity", "Links", "Addresses", "Risk", "Security", "History", "AI"
     ])
     with tab_overview:
         info_col, metric_col = st.columns([1, 2])
@@ -2063,6 +2402,19 @@ def render_meme_coin_page():
             ],
         })
         render_df_with_style_fallback(score_df, ["Skor"])
+    with tab_outlook:
+        o1, o2, o3 = st.columns(3)
+        o1.metric("Forward Quality", f"{meme_outlook['quality_score']:.1f}/100")
+        o2.metric("Verdict", meme_outlook["verdict"])
+        o3.metric("Risk", f"{safe_num(sel.get('risk_score'), 0):.0f} - {sel.get('risk_label')}")
+        st.markdown("**Bacaan Detail**")
+        st.dataframe(meme_outlook["metrics"], width="stretch")
+        st.markdown("**Analisis Ke Depan**")
+        st.dataframe(meme_outlook["outlook"], width="stretch")
+        st.markdown("**Scenario Map**")
+        st.dataframe(meme_outlook["scenarios"], width="stretch")
+        st.markdown("**Checklist Praktis**")
+        st.markdown("\n".join(f"- {item}" for item in meme_outlook["checklist"]))
     with tab_flow:
         flow_rows = []
         for window, vol_key, chg_key, buys_key, sells_key, tx_key, ratio_key in [
@@ -2184,7 +2536,7 @@ def render_meme_coin_page():
                 with st.spinner("Menjalankan security check sebelum AI..."):
                     security = run_security_checks(sel)
             with st.spinner("OpenRouter menganalisis meme coin..."):
-                st.markdown(call_openrouter(build_meme_prompt(sel, security=security), openrouter_key, llm_model))
+                st.markdown(call_openrouter(build_meme_prompt(sel, security=security), openrouter_key, llm_model, max_tokens=2000))
             st.caption("Output AI adalah alat bantu screening, bukan rekomendasi investasi.")
 
 

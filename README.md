@@ -13,9 +13,9 @@ Mode Saham BEI menggabungkan:
 - Data teknikal TradingView (scanner)
 - Narasi otomatis dengan OpenRouter (opsional, pakai API key)
 
-Mode Crypto Market memakai data gratis dari Binance Global public API dengan fallback CoinGecko public API.
+Mode Crypto Market memakai data gratis dari Binance Global public API dengan fallback CoinGecko public API. Detail coin terpilih punya tab `Outlook` untuk forward score, range 24h, scenario map, dan checklist praktis.
 
-Mode Meme Coin Radar memakai data gratis dari DEX Screener search API untuk pair DEX, likuiditas, volume, umur pair, buy/sell pressure, dan risk score awal.
+Mode Meme Coin Radar memakai data gratis dari DEX Screener search API untuk pair DEX, likuiditas, volume, umur pair, buy/sell pressure, dan risk score awal. Detail pair terpilih punya tab `Outlook` untuk analisis 15m-1h, 24 jam, 2-3 hari, scenario map, dan checklist risk-first.
 
 Mode Watchlist & Alerts menyimpan kandidat crypto ke `data/`, refresh snapshot, menyimpan history score, dan menampilkan alert sederhana.
 
