@@ -69,8 +69,8 @@ DEX_CHAIN_OPTIONS = {
     "Arbitrum": "arbitrum",
     "Polygon": "polygon",
 }
-BINANCE_QUOTES = ["USDT", "FDUSD", "USDC", "BTC", "ETH", "BNB"]
-CRYPTO_MARKET_SOURCES = ["Auto", "Binance Global", "CoinGecko"]
+BINANCE_QUOTES = ["IDR"]
+CRYPTO_MARKET_SOURCES = ["Indodax IDR", "CoinGecko IDR"]
 COINGECKO_VS_MAP = {
     "USDT": "usd",
     "FDUSD": "usd",
@@ -78,6 +78,7 @@ COINGECKO_VS_MAP = {
     "BTC": "btc",
     "ETH": "eth",
     "BNB": "bnb",
+    "IDR": "idr",
 }
 DATA_DIR = "data"
 WATCHLIST_FILE = os.path.join(DATA_DIR, "crypto_watchlist.json")
@@ -91,6 +92,11 @@ DEX_SOURCE_OPTIONS = [
     "Top Boosted",
     "Watchlist",
 ]
+MEME_COIN_BASES = {
+    "ACT", "BABYDOGE", "BOME", "BONK", "BRETT", "CAT", "DEGEN", "DOGE",
+    "FLOKI", "MEME", "MOG", "NEIRO", "PEOPLE", "PENGU", "PEPE", "POPCAT",
+    "SHIB", "TOSHI", "TURBO", "WIF",
+}
 CHAIN_SECURITY_IDS = {
     "ethereum": "1",
     "bsc": "56",
@@ -536,6 +542,35 @@ def price_text(value):
         return "N/A"
 
 
+def format_idr(value, compact=True):
+    if compact:
+        return format_compact(value, "Rp")
+    raw = price_text(value)
+    return raw if raw == "N/A" else f"Rp{raw}"
+
+
+def format_market_price(row, key="last_price"):
+    quote = str(row.get("quote", "IDR")).upper()
+    value = row.get(key)
+    if quote == "IDR":
+        return format_idr(value, compact=False)
+    prefix = "$" if quote in {"USDT", "FDUSD", "USDC", "USD"} else ""
+    raw = price_text(value)
+    if raw == "N/A":
+        return raw
+    return f"{prefix}{raw}" if prefix else f"{raw} {quote}"
+
+
+def format_market_amount(row, key="quote_volume"):
+    quote = str(row.get("quote", "IDR")).upper()
+    value = row.get(key)
+    if quote == "IDR":
+        return format_idr(value)
+    prefix = "$" if quote in {"USDT", "FDUSD", "USDC", "USD"} else ""
+    text = format_compact(value, prefix)
+    return text if prefix or text == "N/A" else f"{text} {quote}"
+
+
 def compact_address(value):
     text = str(value or "").strip()
     if len(text) <= 14:
@@ -837,6 +872,22 @@ def fetch_binance_24h():
     raise RuntimeError(f"Gagal mengambil data Binance public API: {last_error}")
 
 
+@st.cache_data(ttl=45, show_spinner=False)
+def fetch_indodax_summaries():
+    data = fetch_public_json("https://indodax.com/api/summaries", timeout=20)
+    if isinstance(data, dict) and isinstance(data.get("tickers"), dict):
+        return data, "https://indodax.com/api/summaries"
+    raise RuntimeError("Indodax tidak mengembalikan data summaries.")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_indodax_pairs():
+    data = fetch_public_json("https://indodax.com/api/pairs", timeout=20)
+    if isinstance(data, list):
+        return data, "https://indodax.com/api/pairs"
+    raise RuntimeError("Indodax tidak mengembalikan data pairs.")
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_coingecko_markets(vs_currency="usd"):
     data = fetch_public_json(
@@ -915,6 +966,98 @@ def normalize_binance_tickers(rows, quote="USDT"):
     return df.sort_values("crypto_score", ascending=False).reset_index(drop=True)
 
 
+def normalize_indodax_markets(summary, pairs):
+    tickers = summary.get("tickers", {}) if isinstance(summary, dict) else {}
+    prices_24h = summary.get("prices_24h", {}) if isinstance(summary, dict) else {}
+    prices_7d = summary.get("prices_7d", {}) if isinstance(summary, dict) else {}
+    pair_meta = {
+        str(item.get("ticker_id", "")).lower(): item
+        for item in pairs
+        if isinstance(item, dict) and str(item.get("base_currency", "")).lower() == "idr"
+    }
+    rows = []
+    for ticker_id, ticker in tickers.items():
+        if not isinstance(ticker, dict):
+            continue
+        ticker_id = str(ticker_id).lower()
+        if not ticker_id.endswith("_idr"):
+            continue
+        meta = pair_meta.get(ticker_id, {})
+        pair_key = ticker_id.replace("_", "")
+        traded_currency = str(meta.get("traded_currency") or ticker_id.replace("_idr", "")).lower()
+        base = str(meta.get("traded_currency_unit") or traded_currency).upper()
+        last = safe_num(ticker.get("last"), np.nan)
+        open_24h = safe_num(prices_24h.get(pair_key), np.nan)
+        open_7d = safe_num(prices_7d.get(pair_key), np.nan)
+        change_24h = (last - open_24h) / open_24h * 100 if not pd.isna(last) and not pd.isna(open_24h) and open_24h else np.nan
+        change_7d = (last - open_7d) / open_7d * 100 if not pd.isna(last) and not pd.isna(open_7d) and open_7d else np.nan
+        buy = safe_num(ticker.get("buy"), np.nan)
+        sell = safe_num(ticker.get("sell"), np.nan)
+        weighted = np.nan
+        if not pd.isna(buy) and not pd.isna(sell) and buy > 0 and sell > 0:
+            weighted = (buy + sell) / 2
+        is_maintenance = bool(safe_num(meta.get("is_maintenance"), 0))
+        is_suspended = bool(safe_num(meta.get("is_market_suspended"), 0))
+        rows.append({
+            "symbol": f"{base}IDR",
+            "base": base,
+            "quote": "IDR",
+            "asset_name": ticker.get("name") or meta.get("description") or base,
+            "last_price": last,
+            "change_24h_pct": change_24h,
+            "change_7d_pct": change_7d,
+            "quote_volume": safe_num(ticker.get("vol_idr"), 0),
+            "base_volume": safe_num(ticker.get(f"vol_{traded_currency}"), np.nan),
+            "high_24h": safe_num(ticker.get("high"), np.nan),
+            "low_24h": safe_num(ticker.get("low"), np.nan),
+            "open_24h": open_24h,
+            "open_7d": open_7d,
+            "weighted_avg": weighted,
+            "trade_count": np.nan,
+            "buy_price": buy,
+            "sell_price": sell,
+            "exchange": "Indodax",
+            "market_status": "Maintenance" if is_maintenance or is_suspended else "Aktif",
+            "trade_min_idr": safe_num(meta.get("trade_min_base_currency"), np.nan),
+            "coingecko_id": meta.get("coingecko_id", ""),
+            "logo_url": meta.get("url_logo_png") or meta.get("url_logo", ""),
+            "is_meme": base in MEME_COIN_BASES,
+            "source": "Indodax",
+            "source_url": "https://indodax.com/api/summaries",
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["liquidity_score"] = percentile_series(np.log1p(df["quote_volume"].fillna(0)))
+    df["momentum_score"] = percentile_series(df["change_24h_pct"].fillna(0))
+    df["activity_score"] = percentile_series(np.log1p(df["quote_volume"].fillna(0))) * 0.7 + percentile_series(df["change_7d_pct"].fillna(0)) * 0.3
+    df["crypto_score"] = (
+        df["liquidity_score"] * 0.45 +
+        df["momentum_score"] * 0.35 +
+        df["activity_score"] * 0.20
+    )
+    df.loc[df["market_status"] != "Aktif", "crypto_score"] *= 0.70
+
+    def label(row):
+        change = safe_num(row.get("change_24h_pct"), 0)
+        score = safe_num(row.get("crypto_score"), 0)
+        qv = safe_num(row.get("quote_volume"), 0)
+        if row.get("market_status") != "Aktif":
+            return "Maintenance"
+        if change >= 8 and score >= 70:
+            return "Momentum IDR kuat"
+        if change >= 3 and qv >= 100_000_000:
+            return "Trending IDR"
+        if change <= -6:
+            return "Tekanan jual IDR"
+        if score >= 70:
+            return "Likuid IDR"
+        return "Watchlist IDR"
+
+    df["signal"] = df.apply(label, axis=1)
+    return df.sort_values("crypto_score", ascending=False).reset_index(drop=True)
+
+
 def normalize_coingecko_markets(rows, quote="USDT", vs_currency="usd"):
     df = pd.DataFrame(rows)
     if df.empty or "symbol" not in df.columns:
@@ -922,6 +1065,11 @@ def normalize_coingecko_markets(rows, quote="USDT", vs_currency="usd"):
     q = quote.upper()
     df["base"] = df["symbol"].astype(str).str.upper()
     df["symbol"] = df["base"] + q
+    df["quote"] = q
+    df["asset_name"] = df["name"] if "name" in df.columns else df["base"]
+    df["exchange"] = "CoinGecko"
+    df["market_status"] = "Harga IDR global"
+    df["is_meme"] = df["base"].isin(MEME_COIN_BASES)
     numeric_map = {
         "current_price": "last_price",
         "price_change_percentage_24h": "change_24h_pct",
@@ -933,6 +1081,7 @@ def normalize_coingecko_markets(rows, quote="USDT", vs_currency="usd"):
     for src, dst in numeric_map.items():
         df[dst] = pd.to_numeric(df[src], errors="coerce") if src in df.columns else np.nan
     df["open_24h"] = np.nan
+    df["change_7d_pct"] = np.nan
     df["weighted_avg"] = np.nan
     df["trade_count"] = np.nan
     df["liquidity_score"] = percentile_series(np.log1p(df["quote_volume"].fillna(0)))
@@ -948,9 +1097,10 @@ def normalize_coingecko_markets(rows, quote="USDT", vs_currency="usd"):
         change = safe_num(row.get("change_24h_pct"), 0)
         score = safe_num(row.get("crypto_score"), 0)
         qv = safe_num(row.get("quote_volume"), 0)
+        trending_volume = 1_000_000_000 if q == "IDR" else 1_000_000
         if change >= 12 and score >= 70:
             return "Momentum kuat"
-        if change >= 4 and qv >= 1_000_000:
+        if change >= 4 and qv >= trending_volume:
             return "Trending"
         if change <= -8:
             return "Tekanan jual"
@@ -966,30 +1116,34 @@ def normalize_coingecko_markets(rows, quote="USDT", vs_currency="usd"):
 
 def fetch_crypto_market_df(source="Auto", quote="USDT"):
     errors = []
-    if source in ["Auto", "Binance Global"]:
+    q = "IDR"
+    if source in ["Auto", "Indodax IDR"]:
         try:
-            rows, source_url = fetch_binance_24h()
-            df = normalize_binance_tickers(rows, quote=quote)
+            summary, source_url = fetch_indodax_summaries()
+            pairs, _ = fetch_indodax_pairs()
+            df = normalize_indodax_markets(summary, pairs)
             if not df.empty:
-                return df, source_url, "Binance"
-            errors.append(f"Binance: tidak ada pair quote {quote}.")
+                return df, source_url, "Indodax IDR"
+            errors.append("Indodax: tidak ada pair IDR.")
         except Exception as exc:
-            errors.append(f"Binance: {exc}")
-            if source == "Binance Global":
+            errors.append(f"Indodax: {exc}")
+            if source == "Indodax IDR":
                 raise RuntimeError(errors[-1])
-    if source in ["Auto", "CoinGecko"]:
+    if source in ["CoinGecko IDR", "CoinGecko"]:
         try:
-            vs_currency = COINGECKO_VS_MAP.get(quote.upper(), "usd")
+            vs_currency = COINGECKO_VS_MAP.get(q, "idr")
             rows, source_url = fetch_coingecko_markets(vs_currency=vs_currency)
-            df = normalize_coingecko_markets(rows, quote=quote, vs_currency=vs_currency)
+            df = normalize_coingecko_markets(rows, quote=q, vs_currency=vs_currency)
             if not df.empty:
-                return df, source_url, "CoinGecko"
+                df["exchange"] = "CoinGecko"
+                df["market_status"] = "Harga IDR global"
+                return df, source_url, "CoinGecko IDR"
             errors.append("CoinGecko: tidak ada data market.")
         except Exception as exc:
             errors.append(f"CoinGecko: {exc}")
-            if source == "CoinGecko":
+            if source in ["CoinGecko IDR", "CoinGecko"]:
                 raise RuntimeError(errors[-1])
-    raise RuntimeError(" | ".join(errors) if errors else "Tidak ada source crypto yang berhasil.")
+    raise RuntimeError(" | ".join(errors) if errors else "Tidak ada source crypto IDR yang berhasil.")
 
 
 @st.cache_data(ttl=45, show_spinner=False)
@@ -1328,13 +1482,15 @@ def pct_distance(value, reference):
 
 def crypto_volume_label(row):
     volume = safe_num(row.get("quote_volume"), 0)
-    if volume >= 1_000_000_000:
+    quote = str(row.get("quote", "IDR")).upper()
+    usd_proxy = volume / 16_000 if quote == "IDR" else volume
+    if usd_proxy >= 1_000_000_000:
         return "Sangat tebal"
-    if volume >= 100_000_000:
+    if usd_proxy >= 100_000_000:
         return "Tebal"
-    if volume >= 10_000_000:
+    if usd_proxy >= 10_000_000:
         return "Cukup aktif"
-    if volume >= 1_000_000:
+    if usd_proxy >= 1_000_000:
         return "Tipis-menengah"
     return "Tipis"
 
@@ -1394,9 +1550,9 @@ def build_crypto_forward_analysis(row):
 
     support_candidates = [weighted, open_24h, low]
     support = next((x for x in support_candidates if not pd.isna(x) and x > 0), np.nan)
-    support_label = price_text(support)
-    high_label = price_text(high)
-    low_label = price_text(low)
+    support_label = format_market_price({**dict(row), "support": support}, "support")
+    high_label = format_market_price(row, "high_24h")
+    low_label = format_market_price(row, "low_24h")
 
     metrics = pd.DataFrame([
         {"Metric": "Forward Score", "Value": f"{forward_score:.1f}/100", "Bacaan": "Kualitas setup ke depan dari momentum, volume, aktivitas, dan posisi range."},
@@ -1404,7 +1560,7 @@ def build_crypto_forward_analysis(row):
         {"Metric": "Posisi di range 24h", "Value": f"{pos:.1f}%" if not pd.isna(pos) else "N/A", "Bacaan": "Di atas 60% berarti buyer masih menjaga area atas; di bawah 40% mulai lemah."},
         {"Metric": "Jarak dari high", "Value": pct_text(from_high), "Bacaan": "Dekat high cocok untuk breakout watch, tapi rawan rejection."},
         {"Metric": "Pantulan dari low", "Value": pct_text(from_low), "Bacaan": "Pantulan besar tanpa volume lanjutan sering berubah jadi pullback."},
-        {"Metric": "Kualitas volume", "Value": crypto_volume_label(row), "Bacaan": f"Quote volume 24h {format_compact(row.get('quote_volume'), '$')}."},
+        {"Metric": "Kualitas volume", "Value": crypto_volume_label(row), "Bacaan": f"Volume 24h {format_market_amount(row)}."},
     ])
 
     outlook = pd.DataFrame([
@@ -1804,9 +1960,10 @@ def run_security_checks(row):
 
 def history_row_from_cex(row, item_id=None):
     symbol = str(row.get("symbol", "")).upper()
+    source = str(row.get("source", "indodax")).lower()
     return {
         "ts": utc_now_iso(),
-        "id": item_id or f"cex:binance:{symbol}",
+        "id": item_id or f"cex:{source}:{symbol}",
         "type": "cex",
         "label": symbol,
         "price": safe_num(row.get("last_price"), np.nan),
@@ -1874,8 +2031,11 @@ def refresh_watchlist_snapshot(run_security=False):
     items = load_watchlist()
     now_rows, history_rows, alerts = [], [], []
     rules = load_alert_rules()
-    cex_items = [item for item in items if item.get("type") == "cex"]
-    dex_items = [item for item in items if item.get("type") == "dex"]
+    cex_items = [
+        item for item in items
+        if item.get("type") == "cex" and str(item.get("symbol", "")).upper().endswith("IDR")
+    ]
+    dex_items = []
 
     if cex_items:
         try:
@@ -1910,7 +2070,7 @@ def refresh_watchlist_snapshot(run_security=False):
                     "status": row.get("signal", ""),
                 })
         except Exception as exc:
-            now_rows.append({"id": "cex:error", "type": "cex", "label": "Binance", "status": f"Error: {exc}"})
+            now_rows.append({"id": "cex:error", "type": "cex", "label": "Indodax IDR", "status": f"Error: {exc}"})
 
     for item in dex_items:
         try:
@@ -1951,14 +2111,17 @@ def refresh_watchlist_snapshot(run_security=False):
 
 def build_crypto_market_prompt(row):
     forward = build_crypto_forward_analysis(row)
-    return f"""Kamu analis crypto untuk trader retail modal kecil. Tulis analisis detail dalam bahasa Indonesia, bukan rekomendasi finansial.
+    return f"""Kamu analis crypto market IDR Indonesia untuk trader retail modal kecil. Tulis analisis detail dalam bahasa Indonesia, bukan rekomendasi finansial.
 
 DATA MARKET:
 - Symbol: {row.get("symbol")} ({row.get("base")})
-- Last price: {row.get("last_price")}
+- Exchange/source: {row.get("exchange", row.get("source"))}
+- Status market: {row.get("market_status", "N/A")}
+- Last price: {format_market_price(row)}
 - Change 24h: {pct_text(row.get("change_24h_pct"))}
-- High/Low 24h: {row.get("high_24h")} / {row.get("low_24h")}
-- Quote volume 24h: {format_compact(row.get("quote_volume"), "$")}
+- Change 7d: {pct_text(row.get("change_7d_pct"))}
+- High/Low 24h: {format_market_price(row, "high_24h")} / {format_market_price(row, "low_24h")}
+- Volume IDR 24h: {format_market_amount(row)}
 - Trade count 24h: {format_compact(row.get("trade_count"))}
 - Score: {safe_num(row.get("crypto_score"), 0):.1f}/100
 - Signal: {row.get("signal")}
@@ -1982,6 +2145,41 @@ FORMAT:
 **Kesimpulan Simpel:** format "Kalau X, maka Y. Kalau Z, wait."
 
 Jaga bahasa tegas, detail, dan tidak membingungkan. Jangan menjanjikan cuan. Target 650-900 kata."""
+
+
+def build_meme_idr_prompt(row):
+    forward = build_crypto_forward_analysis(row)
+    return f"""Kamu analis meme coin yang punya pair IDR di exchange Indonesia. Tulis analisis risk-first dalam bahasa Indonesia.
+
+DATA MARKET IDR:
+- Symbol: {row.get("symbol")} ({row.get("asset_name", row.get("base"))})
+- Exchange/source: {row.get("exchange", row.get("source"))}
+- Status market: {row.get("market_status", "N/A")}
+- Last price: {format_market_price(row)}
+- Change 24h / 7d: {pct_text(row.get("change_24h_pct"))} / {pct_text(row.get("change_7d_pct"))}
+- High/Low 24h: {format_market_price(row, "high_24h")} / {format_market_price(row, "low_24h")}
+- Volume IDR 24h: {format_market_amount(row)}
+- Buy/Sell: {format_market_price(row, "buy_price")} / {format_market_price(row, "sell_price")}
+- Score: {safe_num(row.get("crypto_score"), 0):.1f}/100
+- Signal: {row.get("signal")}
+- Forward verdict: {forward["verdict"]}
+- Forward score: {forward["forward_score"]:.1f}/100
+
+FORMAT:
+**Verdict:** [AVOID | WATCH | SPECULATIVE ONLY] + alasan singkat.
+**Kondisi Sekarang:** momentum 24h/7d, volume IDR, spread buy/sell, status market.
+**Analisis Ke Depan:**
+- 1-4 jam:
+- 24 jam:
+- 3-7 hari:
+**Scenario Map:**
+- Lanjut pump:
+- Cooling off:
+- Dump:
+**Risk Plan Modal Kecil:** ukuran posisi, invalidasi, take profit bertahap, dan aturan jangan average down.
+**Kesimpulan Simpel:** masuk hanya kalau apa, hindari kalau apa.
+
+Ingat: meme coin tetap sangat spekulatif walaupun sudah punya pair IDR. Jangan menjanjikan cuan. Target 650-900 kata."""
 
 
 def build_meme_prompt(row, security=None):
@@ -2077,7 +2275,7 @@ def render_home():
     </style>
     """, unsafe_allow_html=True)
     st.title("Market Screener")
-    st.caption("Pilih mode analisis. Modul saham tetap ada, crypto ditambahkan sebagai pintu baru.")
+    st.caption("Pilih mode analisis. Saham BEI tetap utama, crypto/meme coin dibatasi ke market IDR Indonesia.")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown("""
@@ -2092,7 +2290,7 @@ def render_home():
         st.markdown("""
         <div class="home-card">
           <h3>Crypto Market</h3>
-          <p>Market crypto besar dari Binance public API. Cocok untuk BTC, ETH, SOL, dan altcoin listing exchange.</p>
+          <p>Pair crypto IDR dari Indodax. Cocok untuk BTC, ETH, SOL, dan altcoin yang tersedia di market Rupiah.</p>
         </div>
         """, unsafe_allow_html=True)
         if st.button("Buka Crypto Market", width="stretch"):
@@ -2101,7 +2299,7 @@ def render_home():
         st.markdown("""
         <div class="home-card">
           <h3>Meme Coin Radar</h3>
-          <p>Radar pair DEX dari DEX Screener untuk cari momentum, likuiditas, volume, dan red flag awal.</p>
+          <p>Meme coin yang punya pair IDR di exchange Indonesia, bukan pair DEX global.</p>
         </div>
         """, unsafe_allow_html=True)
         if st.button("Buka Meme Coin Radar", width="stretch"):
@@ -2110,7 +2308,7 @@ def render_home():
         st.markdown("""
         <div class="home-card">
           <h3>Watchlist & Alerts</h3>
-          <p>Simpan kandidat, refresh snapshot, lihat alert aktif, dan pantau history score lokal.</p>
+          <p>Simpan kandidat saham/crypto IDR, refresh snapshot, lihat alert aktif, dan pantau history score lokal.</p>
         </div>
         """, unsafe_allow_html=True)
         if st.button("Buka Watchlist", width="stretch"):
@@ -2121,20 +2319,23 @@ def render_home():
 
 
 def render_crypto_market_page():
-    st.title("Crypto Market")
-    st.caption("Data gratis dari Binance Global atau CoinGecko public API. Tidak perlu API key untuk market data.")
+    st.title("Crypto Market IDR")
+    st.caption("Data utama dari Indodax public API: pair crypto yang tersedia di market Rupiah Indonesia.")
     with st.sidebar:
-        st.header("Filter Crypto")
+        st.header("Filter Crypto IDR")
         source = st.selectbox("Source", CRYPTO_MARKET_SOURCES, index=0)
-        quote = st.selectbox("Quote", BINANCE_QUOTES, index=0)
-        min_volume = st.number_input("Min volume 24h", min_value=0, value=1_000_000, step=500_000)
-        sort_by = st.selectbox("Urutkan", ["crypto_score", "quote_volume", "change_24h_pct", "trade_count"], index=0)
+        quote = "IDR"
+        st.caption("Quote dikunci ke IDR supaya tidak mencampur market global non-Rupiah.")
+        if source == "CoinGecko IDR":
+            st.info("CoinGecko IDR hanya konversi harga Rupiah global. Untuk listing Indonesia, gunakan Indodax IDR.")
+        min_volume = st.number_input("Min volume 24h IDR", min_value=0, value=10_000_000, step=10_000_000)
+        sort_by = st.selectbox("Urutkan", ["crypto_score", "quote_volume", "change_24h_pct", "change_7d_pct"], index=0)
         top_n = st.number_input("Top N", min_value=5, max_value=300, value=50, step=5)
         search = st.text_input("Cari symbol", placeholder="BTC, ETH, SOL")
         openrouter_key, llm_model = render_openrouter_controls("crypto_market")
 
     try:
-        with st.spinner("Mengambil data crypto public API..."):
+        with st.spinner("Mengambil data crypto IDR..."):
             df, source_url, active_source = fetch_crypto_market_df(source=source, quote=quote)
     except Exception as exc:
         st.error(f"Data crypto gagal dimuat: {exc}")
@@ -2153,22 +2354,25 @@ def render_crypto_market_page():
     s1, s2, s3, s4 = st.columns(4)
     s1.metric("Pairs", f"{len(view)}")
     s2.metric("Source", active_source)
-    s3.metric("Top Volume", format_compact(view["quote_volume"].max(), "$"))
+    s3.metric("Top Volume", format_idr(view["quote_volume"].max()))
     s4.metric("Avg Change", pct_text(view["change_24h_pct"].mean()))
-    st.caption(f"Endpoint aktif: {source_url}")
+    st.caption(f"Endpoint aktif: {source_url}. Semua angka harga/volume memakai IDR.")
 
     display_cols = [
-        "symbol", "last_price", "change_24h_pct", "quote_volume",
-        "trade_count", "crypto_score", "signal",
+        "symbol", "asset_name", "last_price", "change_24h_pct", "change_7d_pct",
+        "quote_volume", "market_status", "crypto_score", "signal",
     ]
     st.subheader("Market List")
     disp = view[display_cols].rename(columns={
         "last_price": "price",
         "change_24h_pct": "chg_24h%",
+        "change_7d_pct": "chg_7d%",
         "quote_volume": "volume_24h",
-        "trade_count": "trades_24h",
+        "market_status": "status",
         "crypto_score": "score",
     })
+    disp["price"] = view.apply(lambda row: format_market_price(row), axis=1).values
+    disp["volume_24h"] = view.apply(lambda row: format_market_amount(row), axis=1).values
     render_df_with_style_fallback(disp, ["score"])
     st.download_button("Export CSV", view.to_csv(index=False).encode("utf-8"), "crypto_market.csv", "text/csv")
 
@@ -2181,10 +2385,10 @@ def render_crypto_market_page():
     sel = view[view["symbol"] == selected_symbol].iloc[0]
     st.subheader(f"{sel['symbol']} - {sel['signal']}")
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Price", f"{safe_num(sel.get('last_price'), 0):,.8g}")
+    m1.metric("Price", format_market_price(sel))
     m2.metric("24h", pct_text(sel.get("change_24h_pct")))
-    m3.metric("Volume", format_compact(sel.get("quote_volume"), "$"))
-    m4.metric("Trades", format_compact(sel.get("trade_count")))
+    m3.metric("Volume", format_market_amount(sel))
+    m4.metric("7d", pct_text(sel.get("change_7d_pct")))
     m5.metric("Score", f"{safe_num(sel.get('crypto_score'), 0):.1f}")
 
     cta1, cta2, cta3 = st.columns([1, 1, 2])
@@ -2210,8 +2414,10 @@ def render_crypto_market_page():
         st.dataframe(pd.DataFrame({
             "Metric": ["Open 24h", "High 24h", "Low 24h", "Weighted Avg", "Liquidity Score", "Momentum Score", "Activity Score"],
             "Value": [
-                sel.get("open_24h"), sel.get("high_24h"), sel.get("low_24h"),
-                sel.get("weighted_avg"),
+                format_market_price(sel, "open_24h"),
+                format_market_price(sel, "high_24h"),
+                format_market_price(sel, "low_24h"),
+                format_market_price(sel, "weighted_avg"),
                 f"{safe_num(sel.get('liquidity_score'), 0):.1f}",
                 f"{safe_num(sel.get('momentum_score'), 0):.1f}",
                 f"{safe_num(sel.get('activity_score'), 0):.1f}",
@@ -2231,7 +2437,7 @@ def render_crypto_market_page():
         st.markdown("**Checklist Praktis**")
         st.markdown("\n".join(f"- {item}" for item in crypto_outlook["checklist"]))
     with tab_chart:
-        tv_sym = f"BINANCE:{selected_symbol}" if sel.get("source") == "Binance" else f"CRYPTO:{selected_symbol}"
+        tv_sym = f"INDODAX:{selected_symbol}" if sel.get("source") == "Indodax" else f"CRYPTO:{selected_symbol}"
         components.html(f"""<div class="tradingview-widget-container" style="height:560px;width:100%;">
           <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%;"></div>
           <script src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
@@ -2247,6 +2453,137 @@ def render_crypto_market_page():
 
 
 def render_meme_coin_page():
+    st.title("Meme Coin IDR")
+    st.caption("Meme coin yang punya pair IDR di Indodax. Ini market Rupiah Indonesia, bukan pair DEX global.")
+    with st.sidebar:
+        st.header("Filter Meme Coin IDR")
+        min_volume = st.number_input("Min volume 24h IDR", min_value=0, value=1_000_000, step=1_000_000, key="meme_idr_min_volume")
+        min_score = st.slider("Min score", 0, 100, 0, key="meme_idr_min_score")
+        top_n = st.number_input("Top N", min_value=5, max_value=100, value=30, step=5, key="meme_idr_top_n")
+        search = st.text_input("Cari meme coin", placeholder="DOGE, SHIB, PEPE, BONK", key="meme_idr_search")
+        openrouter_key, llm_model = render_openrouter_controls("meme_coin_idr")
+
+    try:
+        with st.spinner("Mengambil meme coin IDR dari Indodax..."):
+            df, source_url, active_source = fetch_crypto_market_df(source="Indodax IDR", quote="IDR")
+    except Exception as exc:
+        st.error(f"Data meme coin IDR gagal dimuat: {exc}")
+        st.stop()
+
+    view = df[df["is_meme"].fillna(False)].copy()
+    view = view[view["quote_volume"].fillna(0) >= float(min_volume)]
+    view = view[view["crypto_score"].fillna(0) >= float(min_score)]
+    if search:
+        q = search.upper().strip()
+        view = view[
+            view["symbol"].str.contains(q, na=False) |
+            view["base"].str.contains(q, na=False) |
+            view["asset_name"].astype(str).str.upper().str.contains(q, na=False)
+        ]
+    view = view.sort_values("crypto_score", ascending=False).head(int(top_n))
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Meme Pairs", f"{len(view)}")
+    m2.metric("Source", active_source)
+    m3.metric("Top Volume", format_idr(view["quote_volume"].max() if not view.empty else 0))
+    m4.metric("Avg 24h", pct_text(view["change_24h_pct"].mean() if not view.empty else np.nan))
+    st.caption(f"Endpoint aktif: {source_url}. Daftar ini berbasis pair IDR yang tersedia di Indodax.")
+
+    if view.empty:
+        st.warning("Tidak ada meme coin IDR setelah filter. Turunkan min volume/score atau kosongkan pencarian.")
+        st.stop()
+
+    st.subheader("Meme Coin IDR List")
+    table = view[[
+        "symbol", "asset_name", "last_price", "change_24h_pct", "change_7d_pct",
+        "quote_volume", "market_status", "crypto_score", "signal",
+    ]].rename(columns={
+        "last_price": "price",
+        "change_24h_pct": "chg_24h%",
+        "change_7d_pct": "chg_7d%",
+        "quote_volume": "volume_24h",
+        "market_status": "status",
+        "crypto_score": "score",
+    })
+    table["price"] = view.apply(lambda row: format_market_price(row), axis=1).values
+    table["volume_24h"] = view.apply(lambda row: format_market_amount(row), axis=1).values
+    render_df_with_style_fallback(table, ["score"])
+    st.download_button("Export CSV", view.to_csv(index=False).encode("utf-8"), "meme_coin_idr.csv", "text/csv")
+
+    st.markdown("---")
+    selected_symbol = st.selectbox("Pilih meme coin", view["symbol"].tolist(), key="meme_idr_selected")
+    sel = view[view["symbol"] == selected_symbol].iloc[0]
+    st.subheader(f"{sel['symbol']} - {sel['signal']}")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Price", format_market_price(sel))
+    c2.metric("24h", pct_text(sel.get("change_24h_pct")))
+    c3.metric("7d", pct_text(sel.get("change_7d_pct")))
+    c4.metric("Volume", format_market_amount(sel))
+    c5.metric("Score", f"{safe_num(sel.get('crypto_score'), 0):.1f}")
+
+    cex_item = watch_item_from_cex_row(sel)
+    a1, a2, a3 = st.columns([1, 1, 2])
+    with a1:
+        if is_watchlisted(cex_item["id"]):
+            if st.button("Hapus Watchlist", width="stretch", key=f"meme_rm_{cex_item['id']}"):
+                remove_watchlist_item(cex_item["id"])
+                st.rerun()
+        elif st.button("Tambah Watchlist", width="stretch", key=f"meme_add_{cex_item['id']}"):
+            add_watchlist_item(cex_item)
+            st.success("Masuk watchlist.")
+    with a2:
+        if st.button("Simpan Snapshot", width="stretch", key=f"meme_snap_{cex_item['id']}"):
+            append_history_rows([history_row_from_cex(sel, cex_item["id"])])
+            st.success("Snapshot tersimpan ke history.")
+    with a3:
+        st.caption("Meme coin tetap spekulatif walaupun tersedia di pair IDR. Pakai ukuran posisi kecil.")
+
+    meme_outlook = build_crypto_forward_analysis(sel)
+    tab_summary, tab_outlook, tab_chart, tab_ai = st.tabs(["Ringkasan", "Outlook", "Chart", "AI"])
+    with tab_summary:
+        if sel.get("logo_url"):
+            st.image(sel.get("logo_url"), width=72)
+        st.dataframe(pd.DataFrame({
+            "Metric": ["Exchange", "Status", "Buy", "Sell", "High 24h", "Low 24h", "Min Trade IDR", "Base Volume"],
+            "Value": [
+                sel.get("exchange"),
+                sel.get("market_status"),
+                format_market_price(sel, "buy_price"),
+                format_market_price(sel, "sell_price"),
+                format_market_price(sel, "high_24h"),
+                format_market_price(sel, "low_24h"),
+                format_idr(sel.get("trade_min_idr")),
+                format_compact(sel.get("base_volume")),
+            ],
+        }), width="stretch")
+    with tab_outlook:
+        o1, o2, o3 = st.columns(3)
+        o1.metric("Forward Score", f"{meme_outlook['forward_score']:.1f}/100")
+        o2.metric("Verdict", meme_outlook["verdict"])
+        o3.metric("Signal", str(sel.get("signal", "N/A")))
+        st.markdown("**Bacaan Detail**")
+        st.dataframe(meme_outlook["metrics"], width="stretch")
+        st.markdown("**Analisis Ke Depan**")
+        st.dataframe(meme_outlook["outlook"], width="stretch")
+        st.markdown("**Scenario Map**")
+        st.dataframe(meme_outlook["scenarios"], width="stretch")
+        st.markdown("**Checklist Praktis**")
+        st.markdown("\n".join(f"- {item}" for item in meme_outlook["checklist"]))
+    with tab_chart:
+        components.html(f"""<div class="tradingview-widget-container" style="height:560px;width:100%;">
+          <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%;"></div>
+          <script src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+          {json.dumps({"autosize": True, "symbol": f"INDODAX:{selected_symbol}", "interval": "60", "timezone": "Asia/Jakarta", "theme": "dark", "style": "1", "locale": "id", "allow_symbol_change": True})}
+          </script></div>""", height=580)
+    with tab_ai:
+        if not openrouter_key:
+            st.warning("Masukkan OpenRouter API Key di sidebar untuk AI.")
+        elif st.button("Generate Analisis AI", width="stretch", key=f"meme_ai_{selected_symbol}"):
+            with st.spinner("OpenRouter menganalisis meme coin IDR..."):
+                st.markdown(call_openrouter(build_meme_idr_prompt(sel), openrouter_key, llm_model, max_tokens=1800))
+            st.caption("Output AI adalah alat bantu screening, bukan rekomendasi investasi.")
+    return
+
     st.title("Meme Coin Radar")
     st.caption("Data gratis dari DEX Screener. Cocok untuk screening awal pair DEX, bukan validasi final kontrak.")
     with st.sidebar:
@@ -2541,23 +2878,20 @@ def render_meme_coin_page():
 
 
 def render_watchlist_page():
-    st.title("Watchlist & Alerts")
-    st.caption("Watchlist, alert sederhana, dan history score disimpan lokal di folder data/.")
-    items = load_watchlist()
+    st.title("Watchlist & Alerts IDR")
+    st.caption("Watchlist crypto IDR, alert sederhana, dan history score disimpan lokal di folder data/.")
+    items = [
+        item for item in load_watchlist()
+        if item.get("type") == "cex" and str(item.get("symbol", "")).upper().endswith("IDR")
+    ]
 
     with st.sidebar:
         st.header("Alert Rules")
         rules = load_alert_rules()
         with st.form("alert_rules_form"):
-            rules["dex_min_radar"] = st.number_input("DEX min radar", 0.0, 100.0, float(rules["dex_min_radar"]), 1.0)
-            rules["dex_max_risk"] = st.number_input("DEX risk alert >= ", 0.0, 100.0, float(rules["dex_max_risk"]), 1.0)
-            rules["dex_min_liquidity"] = st.number_input("DEX min liquidity", 0.0, 10_000_000.0, float(rules["dex_min_liquidity"]), 5_000.0)
-            rules["dex_min_h1_change"] = st.number_input("DEX pump 1h >=", -100.0, 1000.0, float(rules["dex_min_h1_change"]), 1.0)
-            rules["dex_dump_h1_change"] = st.number_input("DEX dump 1h <=", -100.0, 0.0, float(rules["dex_dump_h1_change"]), 1.0)
-            rules["dex_min_buy_ratio"] = st.slider("DEX buy ratio >=", 0.0, 1.0, float(rules["dex_min_buy_ratio"]), 0.01)
-            rules["cex_min_score"] = st.number_input("CEX min score", 0.0, 100.0, float(rules["cex_min_score"]), 1.0)
-            rules["cex_min_24h_change"] = st.number_input("CEX pump 24h >=", -100.0, 1000.0, float(rules["cex_min_24h_change"]), 1.0)
-            rules["cex_dump_24h_change"] = st.number_input("CEX dump 24h <=", -100.0, 0.0, float(rules["cex_dump_24h_change"]), 1.0)
+            rules["cex_min_score"] = st.number_input("IDR min score", 0.0, 100.0, float(rules["cex_min_score"]), 1.0)
+            rules["cex_min_24h_change"] = st.number_input("IDR pump 24h >=", -100.0, 1000.0, float(rules["cex_min_24h_change"]), 1.0)
+            rules["cex_dump_24h_change"] = st.number_input("IDR dump 24h <=", -100.0, 0.0, float(rules["cex_dump_24h_change"]), 1.0)
             if st.form_submit_button("Simpan Rules", width="stretch"):
                 save_alert_rules(rules)
                 st.success("Alert rules tersimpan.")
@@ -2590,25 +2924,23 @@ def render_watchlist_page():
         st.caption("Di Streamlit Cloud, file lokal bisa hilang saat app restart/redeploy. Export backup sebelum deploy ulang kalau watchlist/history penting.")
 
     if not items:
-        st.info("Watchlist masih kosong. Tambahkan coin dari Crypto Market atau pair dari Meme Coin Radar.")
+        st.info("Watchlist masih kosong. Tambahkan coin IDR dari Crypto Market atau Meme Coin Radar.")
         return
 
     st.subheader("Daftar Watchlist")
     watch_df = pd.DataFrame(items)
-    show_cols = [c for c in ["type", "label", "source", "chain", "dex", "symbol", "pair_address", "added_at"] if c in watch_df.columns]
+    show_cols = [c for c in ["type", "label", "source", "symbol", "quote", "added_at"] if c in watch_df.columns]
     st.dataframe(watch_df[show_cols], width="stretch")
 
-    a1, a2, a3 = st.columns([1, 1, 2])
+    a1, a2 = st.columns([1, 2])
     with a1:
-        run_security = st.checkbox("Security check saat refresh", value=False)
-    with a2:
         if st.button("Refresh Watchlist", width="stretch"):
             with st.spinner("Mengambil snapshot terbaru..."):
-                snapshot, alerts, saved_count = refresh_watchlist_snapshot(run_security=run_security)
+                snapshot, alerts, saved_count = refresh_watchlist_snapshot(run_security=False)
             st.session_state["watchlist_snapshot"] = snapshot
             st.session_state["watchlist_alerts"] = alerts
             st.success(f"{saved_count} snapshot tersimpan ke history.")
-    with a3:
+    with a2:
         remove_options = {item.get("label", item.get("id")): item.get("id") for item in items}
         selected_remove = st.selectbox("Hapus item", ["-"] + list(remove_options.keys()))
         if selected_remove != "-" and st.button("Hapus dari Watchlist", width="stretch"):

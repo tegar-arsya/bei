@@ -13,9 +13,9 @@ Mode Saham BEI menggabungkan:
 - Data teknikal TradingView (scanner)
 - Narasi otomatis dengan OpenRouter (opsional, pakai API key)
 
-Mode Crypto Market memakai data gratis dari Binance Global public API dengan fallback CoinGecko public API. Detail coin terpilih punya tab `Outlook` untuk forward score, range 24h, scenario map, dan checklist praktis.
+Mode Crypto Market memakai data gratis dari Indodax public API untuk pair crypto IDR yang tersedia di market Indonesia. CoinGecko IDR tersedia sebagai pembanding harga Rupiah global, bukan bukti listing lokal. Detail coin terpilih punya tab `Outlook` untuk forward score, range 24h, scenario map, dan checklist praktis.
 
-Mode Meme Coin Radar memakai data gratis dari DEX Screener search API untuk pair DEX, likuiditas, volume, umur pair, buy/sell pressure, dan risk score awal. Detail pair terpilih punya tab `Outlook` untuk analisis 15m-1h, 24 jam, 2-3 hari, scenario map, dan checklist risk-first.
+Mode Meme Coin Radar menampilkan meme coin yang punya pair IDR di Indodax, seperti DOGE, SHIB, PEPE, FLOKI, BONK, WIF, dan sejenisnya jika tersedia. Modul ini tidak memakai pair DEX global.
 
 Mode Watchlist & Alerts menyimpan kandidat crypto ke `data/`, refresh snapshot, menyimpan history score, dan menampilkan alert sederhana.
 
@@ -45,8 +45,8 @@ http://localhost:8501
 Di halaman awal, pilih mode:
 
 - `Saham BEI` untuk workflow lama berbasis upload data BEI
-- `Crypto Market` untuk coin besar/altcoin listing exchange
-- `Meme Coin Radar` untuk screening awal meme coin/pair DEX
+- `Crypto Market` untuk coin besar/altcoin dengan pair IDR di Indonesia
+- `Meme Coin Radar` untuk meme coin dengan pair IDR di Indonesia
 - `Watchlist & Alerts` untuk memantau kandidat yang disimpan
 
 Untuk fitur AI narasi, isi OpenRouter API key di sidebar (didapat dari OpenRouter).
@@ -152,10 +152,8 @@ Kategori:
 ## Catatan penting
 
 - Data TradingView dan OpenRouter tergantung koneksi internet.
-- Data Crypto Market tergantung Binance Global atau CoinGecko public API.
-- Data Meme Coin Radar tergantung DEX Screener public API.
-- Security check memakai GoPlus untuk chain EVM, Honeypot.is untuk Ethereum/BSC/Base, dan RugCheck untuk Solana jika endpoint tersedia.
+- Data Crypto Market dan Meme Coin Radar tergantung Indodax public API. CoinGecko IDR hanya pembanding harga Rupiah global.
 - Watchlist, alert rules, dan history tersimpan lokal di folder `data/`.
 - Jika TradingView gagal diambil, app tetap jalan dengan analisis BEI saja.
 - Output AI bersifat asisten analisis, bukan rekomendasi investasi final.
-- Risk score meme coin belum menggantikan cek manual contract, holder, tax/honeypot, dan liquidity lock.
+- Meme coin tetap sangat spekulatif walaupun sudah punya pair IDR.
