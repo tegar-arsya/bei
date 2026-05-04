@@ -1,0 +1,11 @@
+[server]
+headless = true
+runOnSave = false
+enableCORS = true
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"

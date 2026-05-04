@@ -2,6 +2,7 @@ import io
 import json
 import os
 import requests
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -9,7 +10,13 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-st.set_page_config(page_title="BEI Screener v3", layout="wide")
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+st.set_page_config(page_title="Market Screener", layout="wide")
 
 REQUIRED_COLUMNS = {
     "ringkasan_saham": [
@@ -51,6 +58,60 @@ TV_FIELDS = [
     "relative_volume_10d_calc",
     "Mom", "AO",
 ]
+
+APP_PAGES = ["Home", "Saham BEI", "Crypto Market", "Meme Coin Radar", "Watchlist & Alerts"]
+DEX_CHAIN_OPTIONS = {
+    "Semua chain": "all",
+    "Solana": "solana",
+    "Base": "base",
+    "BSC": "bsc",
+    "Ethereum": "ethereum",
+    "Arbitrum": "arbitrum",
+    "Polygon": "polygon",
+}
+BINANCE_QUOTES = ["USDT", "FDUSD", "USDC", "BTC", "ETH", "BNB"]
+CRYPTO_MARKET_SOURCES = ["Auto", "Binance Global", "CoinGecko"]
+COINGECKO_VS_MAP = {
+    "USDT": "usd",
+    "FDUSD": "usd",
+    "USDC": "usd",
+    "BTC": "btc",
+    "ETH": "eth",
+    "BNB": "bnb",
+}
+DATA_DIR = "data"
+WATCHLIST_FILE = os.path.join(DATA_DIR, "crypto_watchlist.json")
+HISTORY_FILE = os.path.join(DATA_DIR, "crypto_history.json")
+ALERT_RULES_FILE = os.path.join(DATA_DIR, "crypto_alert_rules.json")
+MAX_HISTORY_ROWS = 2500
+DEX_SOURCE_OPTIONS = [
+    "Search",
+    "Latest Profiles",
+    "Latest Boosted",
+    "Top Boosted",
+    "Watchlist",
+]
+CHAIN_SECURITY_IDS = {
+    "ethereum": "1",
+    "bsc": "56",
+    "base": "8453",
+    "arbitrum": "42161",
+    "polygon": "137",
+    "optimism": "10",
+    "avalanche": "43114",
+}
+HONEYPOT_CHAIN_IDS = {"ethereum": "1", "bsc": "56", "base": "8453"}
+DEFAULT_ALERT_RULES = {
+    "dex_min_radar": 70.0,
+    "dex_max_risk": 55.0,
+    "dex_min_liquidity": 25_000.0,
+    "dex_min_h1_change": 12.0,
+    "dex_dump_h1_change": -25.0,
+    "dex_min_buy_ratio": 0.55,
+    "cex_min_score": 72.0,
+    "cex_min_24h_change": 6.0,
+    "cex_dump_24h_change": -8.0,
+}
 
 def tv_rec_label(val):
     try:
@@ -123,9 +184,9 @@ def color_signal(val):
 
 def render_df_with_style_fallback(df, subset_cols):
     try:
-        st.dataframe(df.style.applymap(color_signal, subset=subset_cols), use_container_width=True)
+        st.dataframe(df.style.applymap(color_signal, subset=subset_cols), width="stretch")
     except Exception:
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width="stretch")
 
 def factor_label(score):
     if pd.isna(score): return "N/A"
@@ -137,9 +198,6 @@ def factor_label(score):
 
 
 def get_static_openrouter_key() -> str:
-    # Hardcoded fallback key (least secure; use only if you accept source exposure risk).
-    hardcoded_key = " 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"
-
     key = ""
     try:
         key = str(st.secrets.get("OPENROUTER_API_KEY", "")).strip()
@@ -147,8 +205,6 @@ def get_static_openrouter_key() -> str:
         key = ""
     if not key:
         key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    if not key and hardcoded_key != "YOUR_OPENROUTER_API_KEY":
-        key = hardcoded_key.strip()
     return key
 
 
@@ -405,6 +461,1843 @@ def call_openrouter(prompt, api_key, model):
         return f"HTTP Error {code}"
     except Exception as e: return f"Gagal: {e}"
 
+
+# -- CRYPTO DATA --
+def fetch_public_json(url, params=None, timeout=15):
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Market-Screener/1.0",
+    }
+    resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def format_compact(value, prefix=""):
+    try:
+        v = float(value)
+        if pd.isna(v):
+            return "N/A"
+    except Exception:
+        return "N/A"
+    sign = "-" if v < 0 else ""
+    v_abs = abs(v)
+    for size, suffix in [(1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")]:
+        if v_abs >= size:
+            return f"{sign}{prefix}{v_abs / size:.2f}{suffix}"
+    return f"{sign}{prefix}{v_abs:.2f}"
+
+
+def format_age(minutes):
+    try:
+        m = float(minutes)
+        if pd.isna(m) or m < 0:
+            return "N/A"
+    except Exception:
+        return "N/A"
+    if m < 60:
+        return f"{m:.0f} menit"
+    if m < 1440:
+        return f"{m / 60:.1f} jam"
+    return f"{m / 1440:.1f} hari"
+
+
+def pct_text(value):
+    try:
+        v = float(value)
+        if pd.isna(v):
+            return "N/A"
+        return f"{v:+.2f}%"
+    except Exception:
+        return "N/A"
+
+
+def ratio_text(value, suffix="x"):
+    try:
+        v = float(value)
+        if pd.isna(v) or np.isinf(v):
+            return "N/A"
+        return f"{v:.2f}{suffix}"
+    except Exception:
+        return "N/A"
+
+
+def compact_address(value):
+    text = str(value or "").strip()
+    if len(text) <= 14:
+        return text or "N/A"
+    return f"{text[:6]}...{text[-6:]}"
+
+
+def safe_json(value, default):
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if parsed is not None else default
+        except Exception:
+            return default
+    return value if value is not None else default
+
+
+def extract_dex_links(info):
+    info = safe_json(info, {})
+    links = []
+    if not isinstance(info, dict):
+        return links
+    for item in info.get("websites") or []:
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        label = item.get("label") or "Website"
+        links.append({"label": label, "url": item.get("url"), "type": "website"})
+    for item in info.get("socials") or []:
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        label = item.get("type") or item.get("label") or "Social"
+        links.append({"label": str(label).title(), "url": item.get("url"), "type": "social"})
+    return links
+
+
+def link_summary(info):
+    links = extract_dex_links(info)
+    if not links:
+        return "Tidak ada"
+    labels = [item["label"] for item in links[:4]]
+    extra = len(links) - len(labels)
+    return ", ".join(labels) + (f" +{extra}" if extra > 0 else "")
+
+
+def utc_now_iso():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def read_json_file(path, default):
+    try:
+        if not os.path.exists(path):
+            return default
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception:
+        return default
+
+
+def write_json_file(path, payload):
+    ensure_data_dir()
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
+def load_watchlist():
+    items = read_json_file(WATCHLIST_FILE, [])
+    return items if isinstance(items, list) else []
+
+
+def save_watchlist(items):
+    deduped = {}
+    for item in items:
+        if isinstance(item, dict) and item.get("id"):
+            deduped[item["id"]] = item
+    write_json_file(WATCHLIST_FILE, list(deduped.values()))
+
+
+def load_history():
+    rows = read_json_file(HISTORY_FILE, [])
+    return rows if isinstance(rows, list) else []
+
+
+def save_history(rows):
+    write_json_file(HISTORY_FILE, rows[-MAX_HISTORY_ROWS:])
+
+
+def append_history_rows(rows):
+    if not rows:
+        return
+    history = load_history()
+    history.extend(rows)
+    save_history(history)
+
+
+def load_alert_rules():
+    rules = DEFAULT_ALERT_RULES.copy()
+    stored = read_json_file(ALERT_RULES_FILE, {})
+    if isinstance(stored, dict):
+        for key, value in stored.items():
+            if key in rules:
+                rules[key] = safe_num(value, rules[key])
+    return rules
+
+
+def save_alert_rules(rules):
+    clean = {key: safe_num(rules.get(key), default) for key, default in DEFAULT_ALERT_RULES.items()}
+    write_json_file(ALERT_RULES_FILE, clean)
+
+
+def build_local_backup_payload():
+    return {
+        "schema": "market_screener_backup_v1",
+        "created_at": utc_now_iso(),
+        "watchlist": load_watchlist(),
+        "history": load_history(),
+        "alert_rules": load_alert_rules(),
+    }
+
+
+def restore_local_backup_payload(payload, merge=True):
+    if not isinstance(payload, dict) or payload.get("schema") != "market_screener_backup_v1":
+        raise ValueError("Format backup tidak dikenali.")
+    watchlist = payload.get("watchlist", [])
+    history = payload.get("history", [])
+    alert_rules = payload.get("alert_rules", {})
+    if not isinstance(watchlist, list) or not isinstance(history, list) or not isinstance(alert_rules, dict):
+        raise ValueError("Isi backup tidak valid.")
+
+    if merge:
+        existing_watchlist = {item.get("id"): item for item in load_watchlist() if isinstance(item, dict)}
+        for item in watchlist:
+            if isinstance(item, dict) and item.get("id"):
+                existing_watchlist[item["id"]] = item
+        save_watchlist(list(existing_watchlist.values()))
+
+        existing_history = load_history()
+        existing_keys = {
+            (row.get("ts"), row.get("id"), str(row.get("price")), str(row.get("score")))
+            for row in existing_history if isinstance(row, dict)
+        }
+        for row in history:
+            if not isinstance(row, dict):
+                continue
+            key = (row.get("ts"), row.get("id"), str(row.get("price")), str(row.get("score")))
+            if key not in existing_keys:
+                existing_history.append(row)
+                existing_keys.add(key)
+        save_history(existing_history)
+
+        merged_rules = load_alert_rules()
+        for key, value in alert_rules.items():
+            if key in DEFAULT_ALERT_RULES:
+                merged_rules[key] = safe_num(value, DEFAULT_ALERT_RULES[key])
+        save_alert_rules(merged_rules)
+    else:
+        save_watchlist(watchlist)
+        save_history(history)
+        merged_rules = DEFAULT_ALERT_RULES.copy()
+        for key, value in alert_rules.items():
+            if key in DEFAULT_ALERT_RULES:
+                merged_rules[key] = safe_num(value, DEFAULT_ALERT_RULES[key])
+        save_alert_rules(merged_rules)
+
+
+def get_secret_source():
+    try:
+        if str(st.secrets.get("OPENROUTER_API_KEY", "")).strip():
+            return "Streamlit secrets"
+    except Exception:
+        pass
+    if os.getenv("OPENROUTER_API_KEY", "").strip():
+        return ".env / environment"
+    return "Belum diset"
+
+
+def get_deploy_readiness_rows():
+    secret_source = get_secret_source()
+    try:
+        ensure_data_dir()
+        probe_path = os.path.join(DATA_DIR, ".write_probe")
+        with open(probe_path, "w", encoding="utf-8") as handle:
+            handle.write(utc_now_iso())
+        os.remove(probe_path)
+        data_status = "OK"
+        data_note = "Folder data/ bisa ditulis."
+    except Exception as exc:
+        data_status = "Error"
+        data_note = f"Folder data/ tidak bisa ditulis: {exc}"
+
+    rows = [
+        {
+            "Area": "Secrets",
+            "Status": "OK" if secret_source != "Belum diset" else "Perlu set",
+            "Catatan": f"OpenRouter source: {secret_source}",
+        },
+        {
+            "Area": "Config",
+            "Status": "OK" if os.path.exists(".streamlit/config.toml") else "Kurang",
+            "Catatan": ".streamlit/config.toml tersedia untuk deploy.",
+        },
+        {
+            "Area": "Storage",
+            "Status": data_status,
+            "Catatan": data_note,
+        },
+        {
+            "Area": "Persistence",
+            "Status": "Perhatian",
+            "Catatan": "Streamlit Cloud tidak boleh dianggap sebagai database permanen; gunakan Export/Restore backup.",
+        },
+        {
+            "Area": "Dependencies",
+            "Status": "OK",
+            "Catatan": "requirements.txt dipakai Streamlit saat build.",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def render_deploy_readiness_panel():
+    with st.expander("Deploy Readiness", expanded=False):
+        st.dataframe(get_deploy_readiness_rows(), width="stretch")
+        st.caption("Untuk Streamlit Cloud, isi OPENROUTER_API_KEY dan OPENROUTER_MODEL di menu Secrets, bukan di file .env.")
+
+
+def is_watchlisted(item_id):
+    return any(item.get("id") == item_id for item in load_watchlist())
+
+
+def add_watchlist_item(item):
+    items = load_watchlist()
+    item = item.copy()
+    item["added_at"] = item.get("added_at") or utc_now_iso()
+    items = [old for old in items if old.get("id") != item.get("id")]
+    items.append(item)
+    save_watchlist(items)
+
+
+def remove_watchlist_item(item_id):
+    save_watchlist([item for item in load_watchlist() if item.get("id") != item_id])
+
+
+def watch_item_from_cex_row(row):
+    symbol = str(row.get("symbol", "")).upper()
+    quote = ""
+    for candidate in BINANCE_QUOTES:
+        if symbol.endswith(candidate):
+            quote = candidate
+            break
+    base = symbol[:-len(quote)] if quote else str(row.get("base", ""))
+    source = str(row.get("source", "Binance")).strip() or "Binance"
+    return {
+        "id": f"cex:{source.lower().replace(' ', '_')}:{symbol}",
+        "type": "cex",
+        "source": source,
+        "symbol": symbol,
+        "base": base,
+        "quote": quote,
+        "label": symbol,
+    }
+
+
+def watch_item_from_dex_row(row):
+    chain = str(row.get("chain", "")).lower()
+    pair_address = str(row.get("pair_address", ""))
+    return {
+        "id": f"dex:{chain}:{pair_address.lower()}",
+        "type": "dex",
+        "source": "DEX Screener",
+        "chain": chain,
+        "dex": row.get("dex", ""),
+        "pair": row.get("pair", ""),
+        "pair_address": pair_address,
+        "base_address": row.get("base_address", ""),
+        "base_symbol": row.get("base_symbol", ""),
+        "quote_symbol": row.get("quote_symbol", ""),
+        "url": row.get("url", ""),
+        "label": f"{row.get('pair', '')} - {chain}",
+    }
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_binance_24h():
+    urls = [
+        "https://api.binance.com/api/v3/ticker/24hr",
+    ]
+    last_error = None
+    for url in urls:
+        try:
+            data = fetch_public_json(url, timeout=20)
+            if isinstance(data, list):
+                return data, url
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Gagal mengambil data Binance public API: {last_error}")
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_coingecko_markets(vs_currency="usd"):
+    data = fetch_public_json(
+        "https://api.coingecko.com/api/v3/coins/markets",
+        params={
+            "vs_currency": vs_currency,
+            "order": "volume_desc",
+            "per_page": 250,
+            "page": 1,
+            "sparkline": "false",
+            "price_change_percentage": "24h",
+        },
+        timeout=25,
+    )
+    if isinstance(data, list):
+        return data, f"https://api.coingecko.com/api/v3/coins/markets?vs_currency={vs_currency}"
+    raise RuntimeError("CoinGecko tidak mengembalikan list market.")
+
+
+def normalize_binance_tickers(rows, quote="USDT"):
+    df = pd.DataFrame(rows)
+    if df.empty or "symbol" not in df.columns:
+        return pd.DataFrame()
+    df["symbol"] = df["symbol"].astype(str).str.upper()
+    df = df[df["symbol"].str.endswith(quote)].copy()
+    if df.empty:
+        return df
+    df["base"] = df["symbol"].str[:-len(quote)]
+    exclude = r"(UP|DOWN|BULL|BEAR)$"
+    df = df[~df["base"].str.contains(exclude, regex=True, na=False)].copy()
+    numeric_cols = [
+        "lastPrice", "priceChangePercent", "volume", "quoteVolume",
+        "highPrice", "lowPrice", "openPrice", "weightedAvgPrice", "count",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            df[col] = np.nan
+    df = df.rename(columns={
+        "lastPrice": "last_price",
+        "priceChangePercent": "change_24h_pct",
+        "quoteVolume": "quote_volume",
+        "highPrice": "high_24h",
+        "lowPrice": "low_24h",
+        "openPrice": "open_24h",
+        "weightedAvgPrice": "weighted_avg",
+        "count": "trade_count",
+    })
+    df["liquidity_score"] = percentile_series(np.log1p(df["quote_volume"].fillna(0)))
+    df["momentum_score"] = percentile_series(df["change_24h_pct"].fillna(0))
+    df["activity_score"] = percentile_series(np.log1p(df["trade_count"].fillna(0)))
+    df["crypto_score"] = (
+        df["liquidity_score"] * 0.40 +
+        df["momentum_score"] * 0.35 +
+        df["activity_score"] * 0.25
+    )
+
+    def label(row):
+        change = safe_num(row.get("change_24h_pct"), 0)
+        score = safe_num(row.get("crypto_score"), 0)
+        qv = safe_num(row.get("quote_volume"), 0)
+        if change >= 12 and score >= 70:
+            return "Momentum kuat"
+        if change >= 4 and qv >= 5_000_000:
+            return "Trending"
+        if change <= -8:
+            return "Tekanan jual"
+        if score >= 70:
+            return "Likuid aktif"
+        return "Watchlist"
+
+    df["signal"] = df.apply(label, axis=1)
+    df["source"] = "Binance"
+    df["source_url"] = "https://api.binance.com"
+    return df.sort_values("crypto_score", ascending=False).reset_index(drop=True)
+
+
+def normalize_coingecko_markets(rows, quote="USDT", vs_currency="usd"):
+    df = pd.DataFrame(rows)
+    if df.empty or "symbol" not in df.columns:
+        return pd.DataFrame()
+    q = quote.upper()
+    df["base"] = df["symbol"].astype(str).str.upper()
+    df["symbol"] = df["base"] + q
+    numeric_map = {
+        "current_price": "last_price",
+        "price_change_percentage_24h": "change_24h_pct",
+        "total_volume": "quote_volume",
+        "high_24h": "high_24h",
+        "low_24h": "low_24h",
+        "market_cap": "market_cap",
+    }
+    for src, dst in numeric_map.items():
+        df[dst] = pd.to_numeric(df[src], errors="coerce") if src in df.columns else np.nan
+    df["open_24h"] = np.nan
+    df["weighted_avg"] = np.nan
+    df["trade_count"] = np.nan
+    df["liquidity_score"] = percentile_series(np.log1p(df["quote_volume"].fillna(0)))
+    df["momentum_score"] = percentile_series(df["change_24h_pct"].fillna(0))
+    df["activity_score"] = percentile_series(np.log1p(df["market_cap"].fillna(0)))
+    df["crypto_score"] = (
+        df["liquidity_score"] * 0.45 +
+        df["momentum_score"] * 0.35 +
+        df["activity_score"] * 0.20
+    )
+
+    def label(row):
+        change = safe_num(row.get("change_24h_pct"), 0)
+        score = safe_num(row.get("crypto_score"), 0)
+        qv = safe_num(row.get("quote_volume"), 0)
+        if change >= 12 and score >= 70:
+            return "Momentum kuat"
+        if change >= 4 and qv >= 1_000_000:
+            return "Trending"
+        if change <= -8:
+            return "Tekanan jual"
+        if score >= 70:
+            return "Likuid aktif"
+        return "Watchlist"
+
+    df["signal"] = df.apply(label, axis=1)
+    df["source"] = "CoinGecko"
+    df["source_url"] = f"https://api.coingecko.com ({vs_currency.upper()})"
+    return df.sort_values("crypto_score", ascending=False).reset_index(drop=True)
+
+
+def fetch_crypto_market_df(source="Auto", quote="USDT"):
+    errors = []
+    if source in ["Auto", "Binance Global"]:
+        try:
+            rows, source_url = fetch_binance_24h()
+            df = normalize_binance_tickers(rows, quote=quote)
+            if not df.empty:
+                return df, source_url, "Binance"
+            errors.append(f"Binance: tidak ada pair quote {quote}.")
+        except Exception as exc:
+            errors.append(f"Binance: {exc}")
+            if source == "Binance Global":
+                raise RuntimeError(errors[-1])
+    if source in ["Auto", "CoinGecko"]:
+        try:
+            vs_currency = COINGECKO_VS_MAP.get(quote.upper(), "usd")
+            rows, source_url = fetch_coingecko_markets(vs_currency=vs_currency)
+            df = normalize_coingecko_markets(rows, quote=quote, vs_currency=vs_currency)
+            if not df.empty:
+                return df, source_url, "CoinGecko"
+            errors.append("CoinGecko: tidak ada data market.")
+        except Exception as exc:
+            errors.append(f"CoinGecko: {exc}")
+            if source == "CoinGecko":
+                raise RuntimeError(errors[-1])
+    raise RuntimeError(" | ".join(errors) if errors else "Tidak ada source crypto yang berhasil.")
+
+
+@st.cache_data(ttl=45, show_spinner=False)
+def fetch_dex_search(query):
+    data = fetch_public_json(
+        "https://api.dexscreener.com/latest/dex/search",
+        params={"q": query},
+        timeout=20,
+    )
+    return data.get("pairs", []) if isinstance(data, dict) else []
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_dex_pairs(chain_id, pair_id):
+    data = fetch_public_json(
+        f"https://api.dexscreener.com/latest/dex/pairs/{chain_id}/{pair_id}",
+        timeout=20,
+    )
+    return data.get("pairs", []) if isinstance(data, dict) else []
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_dex_latest_profiles():
+    data = fetch_public_json("https://api.dexscreener.com/token-profiles/latest/v1", timeout=20)
+    return data if isinstance(data, list) else []
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_dex_latest_boosted():
+    data = fetch_public_json("https://api.dexscreener.com/token-boosts/latest/v1", timeout=20)
+    return data if isinstance(data, list) else []
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_dex_top_boosted():
+    data = fetch_public_json("https://api.dexscreener.com/token-boosts/top/v1", timeout=20)
+    return data if isinstance(data, list) else []
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def fetch_dex_tokens(chain_id, token_addresses):
+    cleaned = [str(addr).strip() for addr in token_addresses if str(addr).strip()]
+    if not cleaned:
+        return []
+    data = fetch_public_json(
+        f"https://api.dexscreener.com/tokens/v1/{chain_id}/{','.join(cleaned)}",
+        timeout=25,
+    )
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return data.get("pairs", [])
+    return []
+
+
+def fetch_pairs_from_token_profiles(profiles, limit=60):
+    grouped = {}
+    for item in profiles[:limit]:
+        if not isinstance(item, dict):
+            continue
+        chain = str(item.get("chainId", "")).lower().strip()
+        token = str(item.get("tokenAddress", "")).strip()
+        if chain and token:
+            grouped.setdefault(chain, []).append(token)
+    pairs = []
+    for chain, addresses in grouped.items():
+        seen = []
+        for address in addresses:
+            if address not in seen:
+                seen.append(address)
+        for start in range(0, len(seen), 30):
+            try:
+                pairs.extend(fetch_dex_tokens(chain, seen[start:start + 30]))
+            except Exception:
+                continue
+    return pairs
+
+
+def fetch_meme_source_pairs(source, query, watchlist_limit=120):
+    if source == "Search":
+        return fetch_dex_search(query)
+    if source == "Latest Profiles":
+        return fetch_pairs_from_token_profiles(fetch_dex_latest_profiles(), limit=watchlist_limit)
+    if source == "Latest Boosted":
+        return fetch_pairs_from_token_profiles(fetch_dex_latest_boosted(), limit=watchlist_limit)
+    if source == "Top Boosted":
+        return fetch_pairs_from_token_profiles(fetch_dex_top_boosted(), limit=watchlist_limit)
+    pairs = []
+    for item in load_watchlist():
+        if item.get("type") != "dex":
+            continue
+        try:
+            pairs.extend(fetch_dex_pairs(item.get("chain", ""), item.get("pair_address", "")))
+        except Exception:
+            continue
+    return pairs
+
+
+def nested_num(obj, key, subkey=None, default=np.nan):
+    try:
+        value = obj.get(key, {}) if isinstance(obj, dict) else {}
+        if subkey is not None:
+            value = value.get(subkey, {}) if isinstance(value, dict) else default
+        return safe_num(value, default)
+    except Exception:
+        return default
+
+
+def normalize_dex_pairs(pairs):
+    rows = []
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    for item in pairs:
+        if not isinstance(item, dict):
+            continue
+        base = item.get("baseToken") or {}
+        quote = item.get("quoteToken") or {}
+        txns = item.get("txns") or {}
+        volume = item.get("volume") or {}
+        price_change = item.get("priceChange") or {}
+        liquidity = item.get("liquidity") or {}
+        info = item.get("info") or {}
+        boosts = item.get("boosts") or {}
+        created_at = safe_num(item.get("pairCreatedAt"), np.nan)
+        age_minutes = (now_ms - created_at) / 60000 if not pd.isna(created_at) else np.nan
+        buys_m5 = nested_num(txns, "m5", "buys", 0)
+        sells_m5 = nested_num(txns, "m5", "sells", 0)
+        buys_h1 = nested_num(txns, "h1", "buys", 0)
+        sells_h1 = nested_num(txns, "h1", "sells", 0)
+        buys_h6 = nested_num(txns, "h6", "buys", 0)
+        sells_h6 = nested_num(txns, "h6", "sells", 0)
+        buys_h24 = nested_num(txns, "h24", "buys", 0)
+        sells_h24 = nested_num(txns, "h24", "sells", 0)
+        total_m5 = buys_m5 + sells_m5
+        total_h1 = buys_h1 + sells_h1
+        total_h6 = buys_h6 + sells_h6
+        total_h24 = buys_h24 + sells_h24
+        buy_ratio_m5 = buys_m5 / total_m5 if total_m5 > 0 else np.nan
+        buy_ratio_h1 = buys_h1 / total_h1 if total_h1 > 0 else np.nan
+        buy_ratio_h6 = buys_h6 / total_h6 if total_h6 > 0 else np.nan
+        buy_ratio_h24 = buys_h24 / total_h24 if total_h24 > 0 else np.nan
+        rows.append({
+            "chain": str(item.get("chainId", "")).lower(),
+            "dex": item.get("dexId", ""),
+            "pair_address": item.get("pairAddress", ""),
+            "url": item.get("url", ""),
+            "base_symbol": base.get("symbol", ""),
+            "base_name": base.get("name", ""),
+            "base_address": base.get("address", ""),
+            "quote_name": quote.get("name", ""),
+            "quote_symbol": quote.get("symbol", ""),
+            "quote_address": quote.get("address", ""),
+            "price_usd": safe_num(item.get("priceUsd"), np.nan),
+            "price_native": safe_num(item.get("priceNative"), np.nan),
+            "liquidity_usd": safe_num(liquidity.get("usd"), np.nan),
+            "liquidity_base": safe_num(liquidity.get("base"), np.nan),
+            "liquidity_quote": safe_num(liquidity.get("quote"), np.nan),
+            "fdv": safe_num(item.get("fdv"), np.nan),
+            "market_cap": safe_num(item.get("marketCap"), np.nan),
+            "volume_m5": safe_num(volume.get("m5"), 0),
+            "volume_h1": safe_num(volume.get("h1"), 0),
+            "volume_h6": safe_num(volume.get("h6"), 0),
+            "volume_h24": safe_num(volume.get("h24"), 0),
+            "change_m5_pct": safe_num(price_change.get("m5"), np.nan),
+            "change_h1_pct": safe_num(price_change.get("h1"), np.nan),
+            "change_h6_pct": safe_num(price_change.get("h6"), np.nan),
+            "change_h24_pct": safe_num(price_change.get("h24"), np.nan),
+            "buys_m5": buys_m5,
+            "sells_m5": sells_m5,
+            "buys_h1": buys_h1,
+            "sells_h1": sells_h1,
+            "buys_h6": buys_h6,
+            "sells_h6": sells_h6,
+            "buys_h24": buys_h24,
+            "sells_h24": sells_h24,
+            "txns_m5": total_m5,
+            "txns_h1": total_h1,
+            "txns_h6": total_h6,
+            "txns_h24": total_h24,
+            "buy_ratio_m5": buy_ratio_m5,
+            "buy_ratio_h1": buy_ratio_h1,
+            "buy_ratio_h6": buy_ratio_h6,
+            "buy_ratio_h24": buy_ratio_h24,
+            "age_minutes": age_minutes,
+            "pair_created_at": created_at,
+            "labels": ", ".join(item.get("labels") or []),
+            "boosts_active": safe_num(boosts.get("active"), 0),
+            "info_json": json.dumps(info, ensure_ascii=False),
+            "info_image_url": info.get("imageUrl", "") if isinstance(info, dict) else "",
+            "info_header_url": info.get("header", "") if isinstance(info, dict) else "",
+            "info_open_graph": info.get("openGraph", "") if isinstance(info, dict) else "",
+            "link_summary": link_summary(info),
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["pair"] = (
+        df["base_symbol"].fillna("").astype(str) + "/" +
+        df["quote_symbol"].fillna("").astype(str)
+    )
+    df["liquidity_score"] = percentile_series(np.log1p(df["liquidity_usd"].fillna(0)))
+    df["volume_score"] = percentile_series(np.log1p(df["volume_h1"].fillna(0) + df["volume_h24"].fillna(0) * 0.2))
+    df["momentum_score"] = np.clip(
+        50 +
+        df["change_m5_pct"].fillna(0) * 2.5 +
+        df["change_h1_pct"].fillna(0) * 1.3 +
+        df["change_h24_pct"].fillna(0) * 0.2,
+        0, 100,
+    )
+    df["buy_score"] = np.clip(df["buy_ratio_h1"].fillna(0.5) * 100, 0, 100)
+    df["age_score"] = np.select(
+        [
+            df["age_minutes"].isna(),
+            df["age_minutes"] < 10,
+            df["age_minutes"] <= 1440,
+            df["age_minutes"] <= 10080,
+        ],
+        [35, 45, 80, 60],
+        default=40,
+    )
+    df["radar_score"] = (
+        df["momentum_score"] * 0.30 +
+        df["volume_score"] * 0.25 +
+        df["liquidity_score"] * 0.20 +
+        df["buy_score"] * 0.15 +
+        df["age_score"] * 0.10
+    )
+    fdv_liq = np.where(df["liquidity_usd"].fillna(0) > 0, df["fdv"].fillna(0) / df["liquidity_usd"].fillna(1), np.nan)
+    mcap_liq = np.where(df["liquidity_usd"].fillna(0) > 0, df["market_cap"].fillna(0) / df["liquidity_usd"].fillna(1), np.nan)
+    df["fdv_liq_ratio"] = fdv_liq
+    df["mcap_liq_ratio"] = mcap_liq
+    df["volume_liq_m5"] = np.where(df["liquidity_usd"].fillna(0) > 0, df["volume_m5"].fillna(0) / df["liquidity_usd"].fillna(1), np.nan)
+    df["volume_liq_h1"] = np.where(df["liquidity_usd"].fillna(0) > 0, df["volume_h1"].fillna(0) / df["liquidity_usd"].fillna(1), np.nan)
+    df["volume_liq_h24"] = np.where(df["liquidity_usd"].fillna(0) > 0, df["volume_h24"].fillna(0) / df["liquidity_usd"].fillna(1), np.nan)
+    df["risk_score"] = 0
+    df.loc[df["liquidity_usd"].fillna(0) < 5_000, "risk_score"] += 35
+    df.loc[df["liquidity_usd"].fillna(0).between(5_000, 25_000, inclusive="left"), "risk_score"] += 20
+    df.loc[df["age_minutes"].fillna(0) < 30, "risk_score"] += 20
+    df.loc[df["buy_ratio_h1"].fillna(0.5) < 0.35, "risk_score"] += 15
+    df.loc[df["change_h1_pct"].fillna(0) < -25, "risk_score"] += 15
+    df.loc[pd.Series(fdv_liq, index=df.index).fillna(0) > 150, "risk_score"] += 10
+    df.loc[df["volume_liq_h1"].fillna(0) > 5, "risk_score"] += 10
+    df["risk_score"] = df["risk_score"].clip(0, 100)
+
+    def risk_label(score):
+        s = safe_num(score, 0)
+        if s >= 75:
+            return "Ekstrem"
+        if s >= 55:
+            return "Tinggi"
+        if s >= 35:
+            return "Sedang"
+        return "Rendah"
+
+    df["risk_label"] = df["risk_score"].apply(risk_label)
+    return df.sort_values("radar_score", ascending=False).reset_index(drop=True)
+
+
+def get_pair_flags(row):
+    flags = []
+    liq = safe_num(row.get("liquidity_usd"), 0)
+    age = safe_num(row.get("age_minutes"), np.nan)
+    buy_ratio = safe_num(row.get("buy_ratio_h1"), np.nan)
+    fdv_liq = safe_num(row.get("fdv_liq_ratio"), np.nan)
+    vol_liq_h1 = safe_num(row.get("volume_liq_h1"), np.nan)
+    if liq < 5_000:
+        flags.append("Likuiditas sangat tipis")
+    elif liq < 25_000:
+        flags.append("Likuiditas masih tipis")
+    if not pd.isna(age) and age < 30:
+        flags.append("Pair sangat baru")
+    if not pd.isna(buy_ratio) and buy_ratio < 0.35:
+        flags.append("Sell pressure dominan")
+    if safe_num(row.get("change_h1_pct"), 0) < -25:
+        flags.append("Dump tajam 1 jam")
+    if not pd.isna(fdv_liq) and fdv_liq > 150:
+        flags.append("FDV terlalu besar dibanding likuiditas")
+    if not pd.isna(vol_liq_h1) and vol_liq_h1 > 5:
+        flags.append("Volume 1h sangat besar dibanding likuiditas")
+    if not flags:
+        flags.append("Belum ada red flag kuantitatif besar dari data DEX")
+    flags.append("Belum termasuk audit kontrak/honeypot")
+    return flags
+
+
+def get_pair_risk_breakdown(row):
+    items = []
+    checks = [
+        ("Likuiditas", safe_num(row.get("liquidity_usd"), 0), "USD"),
+        ("Umur pair", safe_num(row.get("age_minutes"), np.nan), "minutes"),
+        ("Buy ratio 1h", safe_num(row.get("buy_ratio_h1"), np.nan), "ratio"),
+        ("Change 1h", safe_num(row.get("change_h1_pct"), np.nan), "pct"),
+        ("FDV/Liquidity", safe_num(row.get("fdv_liq_ratio"), np.nan), "x"),
+        ("Volume/Liquidity 1h", safe_num(row.get("volume_liq_h1"), np.nan), "x"),
+    ]
+    for label, value, kind in checks:
+        status = "OK"
+        note = ""
+        if label == "Likuiditas":
+            status = "Bahaya" if value < 5_000 else "Waspada" if value < 25_000 else "OK"
+            note = format_compact(value, "$")
+        elif label == "Umur pair":
+            status = "Bahaya" if not pd.isna(value) and value < 30 else "Waspada" if not pd.isna(value) and value < 240 else "OK"
+            note = format_age(value)
+        elif label == "Buy ratio 1h":
+            status = "Waspada" if not pd.isna(value) and value < 0.35 else "OK"
+            note = f"{value * 100:.1f}%" if not pd.isna(value) else "N/A"
+        elif label == "Change 1h":
+            status = "Bahaya" if not pd.isna(value) and value < -25 else "Waspada" if not pd.isna(value) and abs(value) > 80 else "OK"
+            note = pct_text(value)
+        elif label == "FDV/Liquidity":
+            status = "Waspada" if not pd.isna(value) and value > 150 else "OK"
+            note = ratio_text(value)
+        elif label == "Volume/Liquidity 1h":
+            status = "Waspada" if not pd.isna(value) and value > 5 else "OK"
+            note = ratio_text(value)
+        items.append({"Faktor": label, "Nilai": note, "Status": status})
+    return pd.DataFrame(items)
+
+
+def risk_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def safe_tax(value):
+    v = safe_num(value, np.nan)
+    if pd.isna(v):
+        return np.nan
+    return v * 100 if 0 <= v <= 1 else v
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_goplus_security(chain, token_address):
+    chain_id = CHAIN_SECURITY_IDS.get(str(chain).lower())
+    if not chain_id or not token_address:
+        return {"available": False, "error": "GoPlus belum didukung untuk chain ini."}
+    try:
+        data = fetch_public_json(
+            f"https://api.gopluslabs.io/api/v1/token_security/{chain_id}",
+            params={"contract_addresses": token_address},
+            timeout=20,
+        )
+        result = data.get("result", {}) if isinstance(data, dict) else {}
+        token_data = result.get(str(token_address).lower()) or result.get(str(token_address)) or {}
+        if not token_data:
+            return {"available": False, "error": "GoPlus tidak mengembalikan data token."}
+        return {"available": True, "chain_id": chain_id, "data": token_data}
+    except Exception as exc:
+        return {"available": False, "error": f"GoPlus error: {exc}"}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_honeypot_security(chain, token_address, pair_address=""):
+    chain_id = HONEYPOT_CHAIN_IDS.get(str(chain).lower())
+    if not chain_id or not token_address:
+        return {"available": False, "error": "Honeypot.is hanya mendukung Ethereum, BSC, dan Base."}
+    params = {"address": token_address, "chainID": chain_id}
+    if pair_address:
+        params["pair"] = pair_address
+    try:
+        data = fetch_public_json("https://api.honeypot.is/v2/IsHoneypot", params=params, timeout=25)
+        return {"available": True, "chain_id": chain_id, "data": data}
+    except Exception as exc:
+        return {"available": False, "error": f"Honeypot.is error: {exc}"}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_rugcheck_security(token_address):
+    if not token_address:
+        return {"available": False, "error": "Token address kosong."}
+    for suffix in ["report/summary", "report"]:
+        try:
+            data = fetch_public_json(f"https://api.rugcheck.xyz/v1/tokens/{token_address}/{suffix}", timeout=25)
+            return {"available": True, "data": data, "endpoint": suffix}
+        except Exception as exc:
+            last_error = exc
+    return {"available": False, "error": f"RugCheck error: {last_error}"}
+
+
+def summarize_goplus(report):
+    if not report.get("available"):
+        return [], [], report.get("error", "GoPlus tidak tersedia.")
+    data = report.get("data", {})
+    flags = []
+    rows = []
+    severe_fields = {
+        "is_honeypot": "GoPlus: indikasi honeypot",
+        "cannot_sell_all": "GoPlus: token tidak bisa dijual penuh",
+        "is_blacklisted": "GoPlus: blacklist aktif",
+        "is_mintable": "GoPlus: mintable",
+        "hidden_owner": "GoPlus: hidden owner",
+        "owner_change_balance": "GoPlus: owner bisa ubah balance",
+        "selfdestruct": "GoPlus: selfdestruct risk",
+        "transfer_pausable": "GoPlus: transfer bisa dipause",
+    }
+    warn_fields = {
+        "external_call": "GoPlus: external call",
+        "trading_cooldown": "GoPlus: trading cooldown",
+        "personal_slippage_modifiable": "GoPlus: slippage personal bisa diubah",
+        "slippage_modifiable": "GoPlus: slippage bisa diubah",
+        "is_proxy": "GoPlus: proxy contract",
+        "is_whitelisted": "GoPlus: whitelist mechanism",
+    }
+    for field, label in severe_fields.items():
+        if risk_bool(data.get(field)):
+            flags.append(("High", label))
+    for field, label in warn_fields.items():
+        if risk_bool(data.get(field)):
+            flags.append(("Medium", label))
+    if str(data.get("is_open_source", "")).strip() == "0":
+        flags.append(("High", "GoPlus: contract tidak open source"))
+    buy_tax = safe_tax(data.get("buy_tax"))
+    sell_tax = safe_tax(data.get("sell_tax"))
+    for label, tax in [("Buy tax", buy_tax), ("Sell tax", sell_tax)]:
+        if not pd.isna(tax):
+            rows.append({"Metric": f"GoPlus {label}", "Value": f"{tax:.2f}%"})
+            if tax >= 25:
+                flags.append(("High", f"GoPlus: {label.lower()} sangat tinggi ({tax:.1f}%)"))
+            elif tax >= 10:
+                flags.append(("Medium", f"GoPlus: {label.lower()} tinggi ({tax:.1f}%)"))
+    for key in ["holder_count", "lp_holder_count", "creator_address", "owner_address"]:
+        if data.get(key) not in [None, ""]:
+            rows.append({"Metric": f"GoPlus {key}", "Value": str(data.get(key))})
+    return flags, rows, "GoPlus aktif"
+
+
+def summarize_honeypot(report):
+    if not report.get("available"):
+        return [], [], report.get("error", "Honeypot.is tidak tersedia.")
+    data = report.get("data", {})
+    flags = []
+    rows = []
+    hp = data.get("honeypotResult") or {}
+    sim = data.get("simulationResult") or {}
+    contract_code = data.get("contractCode") or {}
+    if risk_bool(hp.get("isHoneypot")):
+        flags.append(("High", f"Honeypot.is: honeypot terdeteksi ({hp.get('honeypotReason', '-')})"))
+    for label, key in [("Buy tax", "buyTax"), ("Sell tax", "sellTax"), ("Transfer tax", "transferTax")]:
+        tax = safe_tax(sim.get(key))
+        if not pd.isna(tax):
+            rows.append({"Metric": f"Honeypot {label}", "Value": f"{tax:.2f}%"})
+            if tax >= 25:
+                flags.append(("High", f"Honeypot.is: {label.lower()} sangat tinggi ({tax:.1f}%)"))
+            elif tax >= 10:
+                flags.append(("Medium", f"Honeypot.is: {label.lower()} tinggi ({tax:.1f}%)"))
+    if contract_code:
+        rows.append({"Metric": "Honeypot openSource", "Value": str(contract_code.get("openSource", "N/A"))})
+        rows.append({"Metric": "Honeypot isProxy", "Value": str(contract_code.get("isProxy", "N/A"))})
+        if contract_code.get("openSource") is False:
+            flags.append(("High", "Honeypot.is: contract tidak open source"))
+    for item in data.get("flags") or []:
+        text = item.get("description") if isinstance(item, dict) else str(item)
+        flags.append(("Medium", f"Honeypot.is flag: {text}"))
+    return flags, rows, "Honeypot.is aktif"
+
+
+def summarize_rugcheck(report):
+    if not report.get("available"):
+        return [], [], report.get("error", "RugCheck tidak tersedia.")
+    data = report.get("data", {})
+    flags = []
+    rows = []
+    score = safe_num(data.get("score"), np.nan)
+    if not pd.isna(score):
+        rows.append({"Metric": "RugCheck score", "Value": f"{score:.0f}"})
+        if score >= 10_000:
+            flags.append(("High", f"RugCheck: score risiko tinggi ({score:.0f})"))
+        elif score >= 1_000:
+            flags.append(("Medium", f"RugCheck: score perlu perhatian ({score:.0f})"))
+    for key in ["riskLevel", "verification", "tokenType"]:
+        if data.get(key) not in [None, ""]:
+            rows.append({"Metric": f"RugCheck {key}", "Value": str(data.get(key))})
+    for risk in data.get("risks") or []:
+        if not isinstance(risk, dict):
+            continue
+        level = str(risk.get("level", "Medium")).title()
+        name = risk.get("name") or risk.get("description") or "RugCheck risk"
+        flags.append(("High" if level == "Danger" else level, f"RugCheck: {name}"))
+    return flags, rows, "RugCheck aktif"
+
+
+def run_security_checks(row):
+    chain = str(row.get("chain", "")).lower()
+    token_address = str(row.get("base_address", "")).strip()
+    pair_address = str(row.get("pair_address", "")).strip()
+    reports = {}
+    if chain == "solana":
+        reports["rugcheck"] = fetch_rugcheck_security(token_address)
+    else:
+        reports["goplus"] = fetch_goplus_security(chain, token_address)
+        reports["honeypot"] = fetch_honeypot_security(chain, token_address, pair_address)
+    flags, rows, statuses = [], [], []
+    for key, summarizer in [
+        ("goplus", summarize_goplus),
+        ("honeypot", summarize_honeypot),
+        ("rugcheck", summarize_rugcheck),
+    ]:
+        if key not in reports:
+            continue
+        f, r, status = summarizer(reports[key])
+        flags.extend(f)
+        rows.extend(r)
+        statuses.append(status)
+    high = sum(1 for level, _ in flags if str(level).lower() in {"high", "danger", "critical"})
+    medium = sum(1 for level, _ in flags if str(level).lower() == "medium")
+    security_score = int(np.clip(100 - high * 25 - medium * 10, 0, 100))
+    if security_score >= 80:
+        label = "Relatif aman"
+    elif security_score >= 60:
+        label = "Perlu cek manual"
+    elif security_score >= 35:
+        label = "Berisiko"
+    else:
+        label = "Bahaya"
+    return {
+        "score": security_score,
+        "label": label,
+        "flags": flags,
+        "rows": rows,
+        "statuses": statuses,
+        "reports": reports,
+    }
+
+
+def history_row_from_cex(row, item_id=None):
+    symbol = str(row.get("symbol", "")).upper()
+    return {
+        "ts": utc_now_iso(),
+        "id": item_id or f"cex:binance:{symbol}",
+        "type": "cex",
+        "label": symbol,
+        "price": safe_num(row.get("last_price"), np.nan),
+        "score": safe_num(row.get("crypto_score"), np.nan),
+        "risk": np.nan,
+        "volume": safe_num(row.get("quote_volume"), np.nan),
+        "change": safe_num(row.get("change_24h_pct"), np.nan),
+    }
+
+
+def history_row_from_dex(row, item_id=None):
+    chain = str(row.get("chain", "")).lower()
+    pair_address = str(row.get("pair_address", "")).lower()
+    return {
+        "ts": utc_now_iso(),
+        "id": item_id or f"dex:{chain}:{pair_address}",
+        "type": "dex",
+        "label": row.get("pair", ""),
+        "price": safe_num(row.get("price_usd"), np.nan),
+        "score": safe_num(row.get("radar_score"), np.nan),
+        "risk": safe_num(row.get("risk_score"), np.nan),
+        "volume": safe_num(row.get("volume_h1"), np.nan),
+        "change": safe_num(row.get("change_h1_pct"), np.nan),
+    }
+
+
+def evaluate_alerts_for_cex(row, rules):
+    alerts = []
+    label = str(row.get("symbol", ""))
+    score = safe_num(row.get("crypto_score"), 0)
+    change = safe_num(row.get("change_24h_pct"), 0)
+    if score >= rules["cex_min_score"]:
+        alerts.append({"Level": "Info", "Asset": label, "Alert": f"Score >= {rules['cex_min_score']:.0f}", "Value": f"{score:.1f}"})
+    if change >= rules["cex_min_24h_change"]:
+        alerts.append({"Level": "Momentum", "Asset": label, "Alert": f"24h change >= {rules['cex_min_24h_change']:.1f}%", "Value": pct_text(change)})
+    if change <= rules["cex_dump_24h_change"]:
+        alerts.append({"Level": "Risk", "Asset": label, "Alert": f"Dump 24h <= {rules['cex_dump_24h_change']:.1f}%", "Value": pct_text(change)})
+    return alerts
+
+
+def evaluate_alerts_for_dex(row, rules):
+    alerts = []
+    label = str(row.get("pair", ""))
+    radar = safe_num(row.get("radar_score"), 0)
+    risk = safe_num(row.get("risk_score"), 0)
+    liquidity = safe_num(row.get("liquidity_usd"), 0)
+    change = safe_num(row.get("change_h1_pct"), 0)
+    buy_ratio = safe_num(row.get("buy_ratio_h1"), 0)
+    if radar >= rules["dex_min_radar"]:
+        alerts.append({"Level": "Momentum", "Asset": label, "Alert": f"Radar >= {rules['dex_min_radar']:.0f}", "Value": f"{radar:.1f}"})
+    if risk >= rules["dex_max_risk"]:
+        alerts.append({"Level": "Risk", "Asset": label, "Alert": f"Risk >= {rules['dex_max_risk']:.0f}", "Value": f"{risk:.1f}"})
+    if liquidity < rules["dex_min_liquidity"]:
+        alerts.append({"Level": "Risk", "Asset": label, "Alert": f"Liquidity < {format_compact(rules['dex_min_liquidity'], '$')}", "Value": format_compact(liquidity, "$")})
+    if change >= rules["dex_min_h1_change"]:
+        alerts.append({"Level": "Momentum", "Asset": label, "Alert": f"1h change >= {rules['dex_min_h1_change']:.1f}%", "Value": pct_text(change)})
+    if change <= rules["dex_dump_h1_change"]:
+        alerts.append({"Level": "Risk", "Asset": label, "Alert": f"Dump 1h <= {rules['dex_dump_h1_change']:.1f}%", "Value": pct_text(change)})
+    if buy_ratio >= rules["dex_min_buy_ratio"]:
+        alerts.append({"Level": "Flow", "Asset": label, "Alert": f"Buy ratio >= {rules['dex_min_buy_ratio'] * 100:.0f}%", "Value": f"{buy_ratio * 100:.1f}%"})
+    return alerts
+
+
+def refresh_watchlist_snapshot(run_security=False):
+    items = load_watchlist()
+    now_rows, history_rows, alerts = [], [], []
+    rules = load_alert_rules()
+    cex_items = [item for item in items if item.get("type") == "cex"]
+    dex_items = [item for item in items if item.get("type") == "dex"]
+
+    if cex_items:
+        try:
+            normalized_parts = []
+            quotes = sorted(set(str(item.get("quote") or "USDT").upper() for item in cex_items))
+            for quote in quotes:
+                try:
+                    part, _, _ = fetch_crypto_market_df(source="Auto", quote=quote)
+                    if not part.empty:
+                        normalized_parts.append(part)
+                except Exception:
+                    continue
+            cex_df = pd.concat(normalized_parts, ignore_index=True) if normalized_parts else pd.DataFrame()
+            for item in cex_items:
+                symbol = str(item.get("symbol", "")).upper()
+                row_df = cex_df[cex_df["symbol"] == symbol] if not cex_df.empty else pd.DataFrame()
+                if row_df.empty:
+                    now_rows.append({"id": item.get("id"), "type": "cex", "label": item.get("label"), "status": "Tidak ditemukan"})
+                    continue
+                row = row_df.iloc[0]
+                history_rows.append(history_row_from_cex(row, item.get("id")))
+                alerts.extend(evaluate_alerts_for_cex(row, rules))
+                now_rows.append({
+                    "id": item.get("id"),
+                    "type": "cex",
+                    "label": symbol,
+                    "price": safe_num(row.get("last_price"), np.nan),
+                    "score": safe_num(row.get("crypto_score"), np.nan),
+                    "risk": np.nan,
+                    "volume": safe_num(row.get("quote_volume"), np.nan),
+                    "change": safe_num(row.get("change_24h_pct"), np.nan),
+                    "status": row.get("signal", ""),
+                })
+        except Exception as exc:
+            now_rows.append({"id": "cex:error", "type": "cex", "label": "Binance", "status": f"Error: {exc}"})
+
+    for item in dex_items:
+        try:
+            pairs = fetch_dex_pairs(item.get("chain", ""), item.get("pair_address", ""))
+            df = normalize_dex_pairs(pairs)
+            if df.empty:
+                now_rows.append({"id": item.get("id"), "type": "dex", "label": item.get("label"), "status": "Tidak ditemukan"})
+                continue
+            row = df.iloc[0]
+            security_label = ""
+            security_score = np.nan
+            if run_security:
+                security = run_security_checks(row)
+                security_label = security["label"]
+                security_score = security["score"]
+            history_rows.append(history_row_from_dex(row, item.get("id")))
+            alerts.extend(evaluate_alerts_for_dex(row, rules))
+            now_rows.append({
+                "id": item.get("id"),
+                "type": "dex",
+                "label": row.get("pair"),
+                "chain": row.get("chain"),
+                "price": safe_num(row.get("price_usd"), np.nan),
+                "score": safe_num(row.get("radar_score"), np.nan),
+                "risk": safe_num(row.get("risk_score"), np.nan),
+                "security": security_score,
+                "security_label": security_label,
+                "volume": safe_num(row.get("volume_h1"), np.nan),
+                "change": safe_num(row.get("change_h1_pct"), np.nan),
+                "status": row.get("risk_label", ""),
+            })
+        except Exception as exc:
+            now_rows.append({"id": item.get("id"), "type": "dex", "label": item.get("label"), "status": f"Error: {exc}"})
+
+    append_history_rows(history_rows)
+    return pd.DataFrame(now_rows), pd.DataFrame(alerts), len(history_rows)
+
+
+def build_crypto_market_prompt(row):
+    return f"""Kamu analis crypto untuk trader retail modal kecil. Tulis ringkasan praktis dalam bahasa Indonesia, bukan rekomendasi finansial.
+
+DATA MARKET:
+- Symbol: {row.get("symbol")} ({row.get("base")})
+- Last price: {row.get("last_price")}
+- Change 24h: {pct_text(row.get("change_24h_pct"))}
+- High/Low 24h: {row.get("high_24h")} / {row.get("low_24h")}
+- Quote volume 24h: {format_compact(row.get("quote_volume"), "$")}
+- Trade count 24h: {format_compact(row.get("trade_count"))}
+- Score: {safe_num(row.get("crypto_score"), 0):.1f}/100
+- Signal: {row.get("signal")}
+
+FORMAT:
+**Verdict:** 1 kalimat.
+**Momentum:** 2-3 poin.
+**Risiko:** 2-3 poin.
+**Plan receh:** entry condition, stop invalidasi, take profit bertahap.
+**Kapan wait:** kondisi yang membuat setup batal.
+
+Jaga bahasa singkat dan tegas. Jangan menjanjikan cuan."""
+
+
+def build_meme_prompt(row, security=None):
+    flags = "; ".join(get_pair_flags(row))
+    security_sec = "SECURITY API: Belum dijalankan."
+    if security:
+        sec_flags = "; ".join([f"{level}: {text}" for level, text in security.get("flags", [])]) or "Tidak ada flag besar."
+        security_sec = (
+            f"SECURITY API:\n"
+            f"- Security score: {security.get('score')}/100 ({security.get('label')})\n"
+            f"- Provider: {', '.join(security.get('statuses', [])) or 'N/A'}\n"
+            f"- Flags: {sec_flags}"
+        )
+    return f"""Kamu analis meme coin on-chain. Fokus ke risk-first screening untuk trader modal kecil. Tulis bahasa Indonesia.
+
+DATA PAIR:
+- Pair: {row.get("pair")} di {row.get("chain")} / {row.get("dex")}
+- Price USD: {row.get("price_usd")}
+- Liquidity: {format_compact(row.get("liquidity_usd"), "$")}
+- FDV: {format_compact(row.get("fdv"), "$")}
+- Market cap: {format_compact(row.get("market_cap"), "$")}
+- Age: {format_age(row.get("age_minutes"))}
+- Volume 5m/1h/24h: {format_compact(row.get("volume_m5"), "$")} / {format_compact(row.get("volume_h1"), "$")} / {format_compact(row.get("volume_h24"), "$")}
+- Change 5m/1h/24h: {pct_text(row.get("change_m5_pct"))} / {pct_text(row.get("change_h1_pct"))} / {pct_text(row.get("change_h24_pct"))}
+- Txns 5m/1h/24h: {safe_num(row.get("txns_m5"), 0):.0f} / {safe_num(row.get("txns_h1"), 0):.0f} / {safe_num(row.get("txns_h24"), 0):.0f}
+- Buys-Sells 1h: {safe_num(row.get("buys_h1"), 0):.0f} vs {safe_num(row.get("sells_h1"), 0):.0f}
+- Buy ratio 5m/1h/24h: {safe_num(row.get("buy_ratio_m5"), 0.5) * 100:.1f}% / {safe_num(row.get("buy_ratio_h1"), 0.5) * 100:.1f}% / {safe_num(row.get("buy_ratio_h24"), 0.5) * 100:.1f}%
+- FDV/Liquidity: {ratio_text(row.get("fdv_liq_ratio"))}
+- Volume/Liquidity 1h: {ratio_text(row.get("volume_liq_h1"))}
+- Links tersedia: {row.get("link_summary", "N/A")}
+- Base contract: {row.get("base_address")}
+- Radar score: {safe_num(row.get("radar_score"), 0):.1f}/100
+- Risk score: {safe_num(row.get("risk_score"), 0):.1f}/100 ({row.get("risk_label")})
+- Flags: {flags}
+
+{security_sec}
+
+FORMAT:
+**Verdict:** [AVOID | WATCH | SPECULATIVE ONLY]
+**Kenapa menarik:** maksimal 3 poin.
+**Red flag:** maksimal 4 poin.
+**Plan receh:** ukuran posisi, invalidasi, take profit, dan jangan average down.
+**Data yang wajib dicek manual:** contract, holder, tax/honeypot, liquidity lock.
+
+Jangan menjanjikan cuan. Kalau data risk tinggi, bilang tegas."""
+
+
+def render_openrouter_controls(prefix):
+    st.markdown("---")
+    st.header("AI")
+    static_key = get_static_openrouter_key()
+    model = get_openrouter_model()
+    st.caption(f"Model aktif: {model}")
+    if static_key:
+        st.success("API key statis terdeteksi.")
+        with st.expander("Override API Key"):
+            override = st.text_input("Override Key", type="password", placeholder="sk-or-v1-...", key=f"{prefix}_override")
+        return (override.strip() if override else static_key), model
+    key = st.text_input("OpenRouter API Key", type="password", placeholder="sk-or-v1-...", key=f"{prefix}_key")
+    return key.strip(), model
+
+
+def set_page(page):
+    st.session_state["page"] = page
+    st.rerun()
+
+
+def render_home():
+    st.markdown("""
+    <style>
+    .home-card {
+        min-height: 190px;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        border-radius: 8px;
+        padding: 22px;
+        background: rgba(15, 23, 42, 0.42);
+    }
+    .home-card h3 { margin-top: 0; margin-bottom: 10px; }
+    .home-card p { color: rgba(226, 232, 240, 0.82); line-height: 1.55; }
+    </style>
+    """, unsafe_allow_html=True)
+    st.title("Market Screener")
+    st.caption("Pilih mode analisis. Modul saham tetap ada, crypto ditambahkan sebagai pintu baru.")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown("""
+        <div class="home-card">
+          <h3>Saham BEI</h3>
+          <p>Upload data BEI, scoring flow, teknikal TradingView, dan AI analysis untuk saham Indonesia.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Buka Saham BEI", width="stretch"):
+            set_page("Saham BEI")
+    with c2:
+        st.markdown("""
+        <div class="home-card">
+          <h3>Crypto Market</h3>
+          <p>Market crypto besar dari Binance public API. Cocok untuk BTC, ETH, SOL, dan altcoin listing exchange.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Buka Crypto Market", width="stretch"):
+            set_page("Crypto Market")
+    with c3:
+        st.markdown("""
+        <div class="home-card">
+          <h3>Meme Coin Radar</h3>
+          <p>Radar pair DEX dari DEX Screener untuk cari momentum, likuiditas, volume, dan red flag awal.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Buka Meme Coin Radar", width="stretch"):
+            set_page("Meme Coin Radar")
+    with c4:
+        st.markdown("""
+        <div class="home-card">
+          <h3>Watchlist & Alerts</h3>
+          <p>Simpan kandidat, refresh snapshot, lihat alert aktif, dan pantau history score lokal.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Buka Watchlist", width="stretch"):
+            set_page("Watchlist & Alerts")
+    st.markdown("---")
+    st.info("Catatan: semua output adalah alat bantu analisis, bukan rekomendasi investasi.")
+    render_deploy_readiness_panel()
+
+
+def render_crypto_market_page():
+    st.title("Crypto Market")
+    st.caption("Data gratis dari Binance Global atau CoinGecko public API. Tidak perlu API key untuk market data.")
+    with st.sidebar:
+        st.header("Filter Crypto")
+        source = st.selectbox("Source", CRYPTO_MARKET_SOURCES, index=0)
+        quote = st.selectbox("Quote", BINANCE_QUOTES, index=0)
+        min_volume = st.number_input("Min volume 24h", min_value=0, value=1_000_000, step=500_000)
+        sort_by = st.selectbox("Urutkan", ["crypto_score", "quote_volume", "change_24h_pct", "trade_count"], index=0)
+        top_n = st.number_input("Top N", min_value=5, max_value=300, value=50, step=5)
+        search = st.text_input("Cari symbol", placeholder="BTC, ETH, SOL")
+        openrouter_key, llm_model = render_openrouter_controls("crypto_market")
+
+    try:
+        with st.spinner("Mengambil data crypto public API..."):
+            df, source_url, active_source = fetch_crypto_market_df(source=source, quote=quote)
+    except Exception as exc:
+        st.error(f"Data crypto gagal dimuat: {exc}")
+        st.stop()
+
+    if df.empty:
+        st.warning("Tidak ada data untuk filter ini.")
+        st.stop()
+
+    view = df[df["quote_volume"].fillna(0) >= float(min_volume)].copy()
+    if search:
+        q = search.upper().strip()
+        view = view[view["symbol"].str.contains(q, na=False) | view["base"].str.contains(q, na=False)]
+    view = view.sort_values(sort_by, ascending=False).head(int(top_n))
+
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Pairs", f"{len(view)}")
+    s2.metric("Source", active_source)
+    s3.metric("Top Volume", format_compact(view["quote_volume"].max(), "$"))
+    s4.metric("Avg Change", pct_text(view["change_24h_pct"].mean()))
+    st.caption(f"Endpoint aktif: {source_url}")
+
+    display_cols = [
+        "symbol", "last_price", "change_24h_pct", "quote_volume",
+        "trade_count", "crypto_score", "signal",
+    ]
+    st.subheader("Market List")
+    disp = view[display_cols].rename(columns={
+        "last_price": "price",
+        "change_24h_pct": "chg_24h%",
+        "quote_volume": "volume_24h",
+        "trade_count": "trades_24h",
+        "crypto_score": "score",
+    })
+    render_df_with_style_fallback(disp, ["score"])
+    st.download_button("Export CSV", view.to_csv(index=False).encode("utf-8"), "crypto_market.csv", "text/csv")
+
+    if view.empty:
+        st.warning("Tidak ada coin setelah filter.")
+        st.stop()
+
+    st.markdown("---")
+    selected_symbol = st.selectbox("Pilih coin", view["symbol"].tolist())
+    sel = view[view["symbol"] == selected_symbol].iloc[0]
+    st.subheader(f"{sel['symbol']} - {sel['signal']}")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Price", f"{safe_num(sel.get('last_price'), 0):,.8g}")
+    m2.metric("24h", pct_text(sel.get("change_24h_pct")))
+    m3.metric("Volume", format_compact(sel.get("quote_volume"), "$"))
+    m4.metric("Trades", format_compact(sel.get("trade_count")))
+    m5.metric("Score", f"{safe_num(sel.get('crypto_score'), 0):.1f}")
+
+    cta1, cta2, cta3 = st.columns([1, 1, 2])
+    cex_item = watch_item_from_cex_row(sel)
+    with cta1:
+        if is_watchlisted(cex_item["id"]):
+            if st.button("Hapus Watchlist", width="stretch", key=f"rm_{cex_item['id']}"):
+                remove_watchlist_item(cex_item["id"])
+                st.rerun()
+        elif st.button("Tambah Watchlist", width="stretch", key=f"add_{cex_item['id']}"):
+            add_watchlist_item(cex_item)
+            st.success("Masuk watchlist.")
+    with cta2:
+        if st.button("Simpan Snapshot", width="stretch", key=f"snap_{cex_item['id']}"):
+            append_history_rows([history_row_from_cex(sel, cex_item["id"])])
+            st.success("Snapshot tersimpan ke history.")
+    with cta3:
+        st.caption("Watchlist dan history disimpan lokal di folder data/.")
+
+    tab_summary, tab_chart, tab_ai = st.tabs(["Ringkasan", "Chart", "AI"])
+    with tab_summary:
+        st.dataframe(pd.DataFrame({
+            "Metric": ["Open 24h", "High 24h", "Low 24h", "Weighted Avg", "Liquidity Score", "Momentum Score", "Activity Score"],
+            "Value": [
+                sel.get("open_24h"), sel.get("high_24h"), sel.get("low_24h"),
+                sel.get("weighted_avg"),
+                f"{safe_num(sel.get('liquidity_score'), 0):.1f}",
+                f"{safe_num(sel.get('momentum_score'), 0):.1f}",
+                f"{safe_num(sel.get('activity_score'), 0):.1f}",
+            ],
+        }), width="stretch")
+    with tab_chart:
+        tv_sym = f"BINANCE:{selected_symbol}" if sel.get("source") == "Binance" else f"CRYPTO:{selected_symbol}"
+        components.html(f"""<div class="tradingview-widget-container" style="height:560px;width:100%;">
+          <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%;"></div>
+          <script src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+          {json.dumps({"autosize": True, "symbol": tv_sym, "interval": "60", "timezone": "Asia/Jakarta", "theme": "dark", "style": "1", "locale": "id", "allow_symbol_change": True})}
+          </script></div>""", height=580)
+    with tab_ai:
+        if not openrouter_key:
+            st.warning("Masukkan OpenRouter API Key di sidebar untuk AI.")
+        elif st.button("Generate Analisis AI", width="stretch"):
+            with st.spinner("OpenRouter menganalisis crypto..."):
+                st.markdown(call_openrouter(build_crypto_market_prompt(sel), openrouter_key, llm_model))
+            st.caption("Output AI adalah alat bantu analisis, bukan rekomendasi investasi.")
+
+
+def render_meme_coin_page():
+    st.title("Meme Coin Radar")
+    st.caption("Data gratis dari DEX Screener. Cocok untuk screening awal pair DEX, bukan validasi final kontrak.")
+    with st.sidebar:
+        st.header("Filter Meme Coin")
+        source = st.selectbox("Source", DEX_SOURCE_OPTIONS, index=0)
+        query = st.text_input("Query/token", value="meme", placeholder="meme, pepe, dog, address")
+        chain_label = st.selectbox("Chain", list(DEX_CHAIN_OPTIONS.keys()), index=0)
+        min_liquidity = st.number_input("Min liquidity USD", min_value=0, value=5_000, step=5_000)
+        max_age_hours = st.number_input("Max age jam", min_value=1, max_value=24 * 365, value=24 * 14, step=24)
+        max_risk = st.slider("Max risk score", 0, 100, 80)
+        top_n = st.number_input("Top N", min_value=5, max_value=200, value=50, step=5, key="meme_top_n")
+        openrouter_key, llm_model = render_openrouter_controls("meme_coin")
+
+    if source == "Search" and not query.strip():
+        st.warning("Isi query dulu, misalnya meme, pepe, dog, atau alamat token.")
+        st.stop()
+
+    try:
+        with st.spinner("Mengambil data DEX Screener..."):
+            pairs = fetch_meme_source_pairs(source, query.strip())
+        df = normalize_dex_pairs(pairs)
+    except Exception as exc:
+        st.error(f"Data DEX gagal dimuat: {exc}")
+        st.stop()
+
+    if df.empty:
+        st.warning("Tidak ada pair dari DEX Screener untuk query ini.")
+        st.stop()
+
+    chain = DEX_CHAIN_OPTIONS[chain_label]
+    view = df.copy()
+    if chain != "all":
+        view = view[view["chain"] == chain]
+    view = view[view["liquidity_usd"].fillna(0) >= float(min_liquidity)]
+    view = view[view["risk_score"].fillna(100) <= int(max_risk)]
+    view = view[(view["age_minutes"].isna()) | (view["age_minutes"] <= float(max_age_hours) * 60)]
+    view = view.sort_values("radar_score", ascending=False).head(int(top_n))
+
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Pairs", f"{len(view)}")
+    r2.metric("Top Liquidity", format_compact(view["liquidity_usd"].max() if not view.empty else 0, "$"))
+    r3.metric("Top Radar", f"{safe_num(view['radar_score'].max() if not view.empty else 0, 0):.1f}")
+    r4.metric("Avg Risk", f"{safe_num(view['risk_score'].mean() if not view.empty else 0, 0):.1f}")
+    st.caption(f"Source aktif: {source}. Latest/boosted adalah proxy untuk discovery token baru/trending dari DEX Screener.")
+
+    if view.empty:
+        st.warning("Tidak ada pair setelah filter. Turunkan min liquidity, max risk, atau ganti query.")
+        st.stop()
+
+    st.subheader("Radar List")
+    table = view[[
+        "pair", "chain", "dex", "price_usd", "liquidity_usd", "volume_h1",
+        "txns_h1", "change_m5_pct", "change_h1_pct", "change_h24_pct",
+        "buy_ratio_h1", "fdv_liq_ratio", "volume_liq_h1",
+        "age_minutes", "radar_score", "risk_score", "risk_label", "link_summary",
+    ]].copy()
+    table["age"] = table["age_minutes"].apply(format_age)
+    table["buy_ratio_h1"] = table["buy_ratio_h1"].apply(lambda x: f"{safe_num(x, 0) * 100:.1f}%")
+    table["fdv_liq_ratio"] = table["fdv_liq_ratio"].apply(ratio_text)
+    table["volume_liq_h1"] = table["volume_liq_h1"].apply(ratio_text)
+    table = table.drop(columns=["age_minutes"]).rename(columns={
+        "price_usd": "price",
+        "liquidity_usd": "liquidity",
+        "volume_h1": "vol_1h",
+        "txns_h1": "tx_1h",
+        "change_m5_pct": "chg_5m%",
+        "change_h1_pct": "chg_1h%",
+        "change_h24_pct": "chg_24h%",
+        "fdv_liq_ratio": "fdv/liq",
+        "volume_liq_h1": "vol/liq_1h",
+        "radar_score": "radar",
+        "risk_score": "risk",
+        "risk_label": "risk_label",
+        "link_summary": "links",
+    })
+    render_df_with_style_fallback(table, ["radar"])
+    st.download_button("Export CSV", view.to_csv(index=False).encode("utf-8"), "meme_coin_radar.csv", "text/csv")
+
+    st.markdown("---")
+    view = view.copy()
+    view["select_label"] = (
+        view["pair"].astype(str) + " - " +
+        view["chain"].astype(str) + " - " +
+        view["dex"].astype(str) + " - " +
+        view["pair_address"].astype(str).str[:8]
+    )
+    selected_label = st.selectbox("Pilih pair", view["select_label"].tolist())
+    sel = view[view["select_label"] == selected_label].iloc[0]
+    st.subheader(f"{sel['pair']} di {sel['chain']} / {sel['dex']}")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Price", f"{safe_num(sel.get('price_usd'), 0):,.8g}")
+    m2.metric("Liquidity", format_compact(sel.get("liquidity_usd"), "$"))
+    m3.metric("Vol 1h", format_compact(sel.get("volume_h1"), "$"))
+    m4.metric("Radar", f"{safe_num(sel.get('radar_score'), 0):.1f}")
+    m5.metric("Risk", f"{safe_num(sel.get('risk_score'), 0):.0f} - {sel.get('risk_label')}")
+
+    dex_item = watch_item_from_dex_row(sel)
+    cta1, cta2, cta3, cta4 = st.columns([1, 1, 1, 2])
+    with cta1:
+        if is_watchlisted(dex_item["id"]):
+            if st.button("Hapus Watchlist", width="stretch", key=f"rm_{dex_item['id']}"):
+                remove_watchlist_item(dex_item["id"])
+                st.rerun()
+        elif st.button("Tambah Watchlist", width="stretch", key=f"add_{dex_item['id']}"):
+            add_watchlist_item(dex_item)
+            st.success("Masuk watchlist.")
+    with cta2:
+        if st.button("Simpan Snapshot", width="stretch", key=f"snap_{dex_item['id']}"):
+            append_history_rows([history_row_from_dex(sel, dex_item["id"])])
+            st.success("Snapshot tersimpan ke history.")
+    with cta3:
+        if sel.get("url"):
+            st.link_button("DEX Screener", sel.get("url"), width="stretch")
+    with cta4:
+        st.caption("Security check dipanggil untuk pair terpilih supaya rate limit API gratis tetap aman.")
+
+    tab_overview, tab_flow, tab_liquidity, tab_links, tab_addresses, tab_risk, tab_security, tab_history, tab_ai = st.tabs([
+        "Overview", "Flow", "Liquidity", "Links", "Addresses", "Risk", "Security", "History", "AI"
+    ])
+    with tab_overview:
+        info_col, metric_col = st.columns([1, 2])
+        with info_col:
+            image_url = str(sel.get("info_image_url", "") or sel.get("info_open_graph", "") or "").strip()
+            if image_url:
+                st.image(image_url, width="stretch")
+            st.markdown(f"**{sel.get('base_name') or sel.get('base_symbol')}**")
+            st.caption(f"{sel.get('pair')} di {sel.get('dex')} / {sel.get('chain')}")
+            if sel.get("labels"):
+                st.info(f"Label: {sel.get('labels')}")
+        with metric_col:
+            o1, o2, o3, o4 = st.columns(4)
+            o1.metric("Age", format_age(sel.get("age_minutes")))
+            o2.metric("FDV", format_compact(sel.get("fdv"), "$"))
+            o3.metric("Market Cap", format_compact(sel.get("market_cap"), "$"))
+            o4.metric("Boosts", f"{safe_num(sel.get('boosts_active'), 0):.0f}")
+            o5, o6, o7, o8 = st.columns(4)
+            o5.metric("FDV/Liq", ratio_text(sel.get("fdv_liq_ratio")))
+            o6.metric("Vol/Liq 1h", ratio_text(sel.get("volume_liq_h1")))
+            o7.metric("Tx 1h", format_compact(sel.get("txns_h1")))
+            o8.metric("Buy Ratio 1h", f"{safe_num(sel.get('buy_ratio_h1'), 0.5) * 100:.1f}%")
+        st.markdown("**Score Breakdown**")
+        score_df = pd.DataFrame({
+            "Faktor": ["Radar", "Risk", "Momentum", "Volume", "Liquidity", "Buy Pressure", "Age"],
+            "Skor": [
+                safe_num(sel.get("radar_score"), np.nan),
+                safe_num(sel.get("risk_score"), np.nan),
+                safe_num(sel.get("momentum_score"), np.nan),
+                safe_num(sel.get("volume_score"), np.nan),
+                safe_num(sel.get("liquidity_score"), np.nan),
+                safe_num(sel.get("buy_score"), np.nan),
+                safe_num(sel.get("age_score"), np.nan),
+            ],
+        })
+        render_df_with_style_fallback(score_df, ["Skor"])
+    with tab_flow:
+        flow_rows = []
+        for window, vol_key, chg_key, buys_key, sells_key, tx_key, ratio_key in [
+            ("5m", "volume_m5", "change_m5_pct", "buys_m5", "sells_m5", "txns_m5", "buy_ratio_m5"),
+            ("1h", "volume_h1", "change_h1_pct", "buys_h1", "sells_h1", "txns_h1", "buy_ratio_h1"),
+            ("6h", "volume_h6", "change_h6_pct", "buys_h6", "sells_h6", "txns_h6", "buy_ratio_h6"),
+            ("24h", "volume_h24", "change_h24_pct", "buys_h24", "sells_h24", "txns_h24", "buy_ratio_h24"),
+        ]:
+            buys = safe_num(sel.get(buys_key), 0)
+            sells = safe_num(sel.get(sells_key), 0)
+            ratio = safe_num(sel.get(ratio_key), np.nan)
+            flow_rows.append({
+                "Window": window,
+                "Volume": format_compact(sel.get(vol_key), "$"),
+                "Change": pct_text(sel.get(chg_key)),
+                "Buys": f"{buys:.0f}",
+                "Sells": f"{sells:.0f}",
+                "Txns": f"{safe_num(sel.get(tx_key), 0):.0f}",
+                "Buy Ratio": f"{ratio * 100:.1f}%" if not pd.isna(ratio) else "N/A",
+                "Net Buy": f"{buys - sells:+.0f}",
+            })
+        st.dataframe(pd.DataFrame(flow_rows), width="stretch")
+        f1, f2, f3 = st.columns(3)
+        f1.metric("M5 Buy Ratio", f"{safe_num(sel.get('buy_ratio_m5'), 0.5) * 100:.1f}%")
+        f2.metric("H1 Buy Ratio", f"{safe_num(sel.get('buy_ratio_h1'), 0.5) * 100:.1f}%")
+        f3.metric("H24 Buy Ratio", f"{safe_num(sel.get('buy_ratio_h24'), 0.5) * 100:.1f}%")
+    with tab_liquidity:
+        liquidity_rows = pd.DataFrame({
+            "Metric": [
+                "Liquidity USD", "Liquidity Base", "Liquidity Quote", "FDV", "Market Cap",
+                "FDV/Liquidity", "MarketCap/Liquidity", "Volume/Liquidity 5m",
+                "Volume/Liquidity 1h", "Volume/Liquidity 24h",
+            ],
+            "Value": [
+                format_compact(sel.get("liquidity_usd"), "$"),
+                format_compact(sel.get("liquidity_base")),
+                format_compact(sel.get("liquidity_quote")),
+                format_compact(sel.get("fdv"), "$"),
+                format_compact(sel.get("market_cap"), "$"),
+                ratio_text(sel.get("fdv_liq_ratio")),
+                ratio_text(sel.get("mcap_liq_ratio")),
+                ratio_text(sel.get("volume_liq_m5")),
+                ratio_text(sel.get("volume_liq_h1")),
+                ratio_text(sel.get("volume_liq_h24")),
+            ],
+        })
+        st.dataframe(liquidity_rows, width="stretch")
+        if safe_num(sel.get("liquidity_usd"), 0) < 25_000:
+            st.warning("Likuiditas masih tipis. Slippage dan exit risk bisa besar.")
+        if safe_num(sel.get("fdv_liq_ratio"), 0) > 150:
+            st.warning("FDV jauh lebih besar dari likuiditas. Candle mudah dimanipulasi.")
+    with tab_links:
+        links = extract_dex_links(sel.get("info_json"))
+        if links:
+            for idx, item in enumerate(links):
+                st.link_button(item["label"], item["url"], width="stretch")
+        else:
+            st.info("DEX Screener belum menyediakan website/social untuk pair ini.")
+        if sel.get("url"):
+            st.link_button("DEX Screener", sel.get("url"), width="stretch")
+    with tab_addresses:
+        addr_rows = pd.DataFrame({
+            "Jenis": ["Base Token", "Quote Token", "Pair/Pool"],
+            "Symbol": [sel.get("base_symbol"), sel.get("quote_symbol"), sel.get("pair")],
+            "Address": [sel.get("base_address"), sel.get("quote_address"), sel.get("pair_address")],
+            "Short": [
+                compact_address(sel.get("base_address")),
+                compact_address(sel.get("quote_address")),
+                compact_address(sel.get("pair_address")),
+            ],
+        })
+        st.dataframe(addr_rows, width="stretch")
+        st.caption("Gunakan address lengkap ini untuk cek explorer, holder, liquidity lock, dan security scanner eksternal.")
+    with tab_risk:
+        st.dataframe(get_pair_risk_breakdown(sel), width="stretch")
+        st.markdown("**Flags**")
+        for flag in get_pair_flags(sel):
+            st.warning(flag)
+        st.caption("Risk score ini hanya dari data market DEX. Untuk meme coin, tetap cek contract, holder, tax, honeypot, dan liquidity lock secara manual.")
+    with tab_security:
+        if st.button("Run Security Check", width="stretch", key=f"sec_{dex_item['id']}"):
+            with st.spinner("Menjalankan security API gratis..."):
+                security = run_security_checks(sel)
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Security Score", f"{security['score']}/100")
+            s2.metric("Label", security["label"])
+            s3.metric("Provider", ", ".join(security["statuses"]) if security["statuses"] else "N/A")
+            if security["flags"]:
+                for level, text in security["flags"]:
+                    if str(level).lower() in {"high", "danger", "critical"}:
+                        st.error(text)
+                    else:
+                        st.warning(text)
+            else:
+                st.success("Tidak ada red flag besar dari provider security yang tersedia.")
+            if security["rows"]:
+                st.dataframe(pd.DataFrame(security["rows"]), width="stretch")
+            with st.expander("Raw provider status"):
+                st.json({k: {"available": v.get("available"), "error": v.get("error"), "endpoint": v.get("endpoint")} for k, v in security["reports"].items()})
+        else:
+            st.info("Klik tombol untuk cek GoPlus/Honeypot.is di EVM atau RugCheck di Solana.")
+    with tab_history:
+        history = pd.DataFrame(load_history())
+        item_history = history[history["id"] == dex_item["id"]].copy() if not history.empty and "id" in history.columns else pd.DataFrame()
+        if item_history.empty:
+            st.info("Belum ada history untuk pair ini. Klik Simpan Snapshot atau refresh dari Watchlist & Alerts.")
+        else:
+            item_history["ts"] = pd.to_datetime(item_history["ts"], errors="coerce")
+            st.line_chart(item_history.set_index("ts")[["score", "risk", "change"]])
+            st.dataframe(item_history.sort_values("ts", ascending=False), width="stretch")
+    with tab_ai:
+        if not openrouter_key:
+            st.warning("Masukkan OpenRouter API Key di sidebar untuk AI.")
+        else:
+            include_security = st.checkbox("Sertakan security check", value=True)
+        if openrouter_key and st.button("Generate AI Risk Summary", width="stretch"):
+            security = None
+            if include_security:
+                with st.spinner("Menjalankan security check sebelum AI..."):
+                    security = run_security_checks(sel)
+            with st.spinner("OpenRouter menganalisis meme coin..."):
+                st.markdown(call_openrouter(build_meme_prompt(sel, security=security), openrouter_key, llm_model))
+            st.caption("Output AI adalah alat bantu screening, bukan rekomendasi investasi.")
+
+
+def render_watchlist_page():
+    st.title("Watchlist & Alerts")
+    st.caption("Watchlist, alert sederhana, dan history score disimpan lokal di folder data/.")
+    items = load_watchlist()
+
+    with st.sidebar:
+        st.header("Alert Rules")
+        rules = load_alert_rules()
+        with st.form("alert_rules_form"):
+            rules["dex_min_radar"] = st.number_input("DEX min radar", 0.0, 100.0, float(rules["dex_min_radar"]), 1.0)
+            rules["dex_max_risk"] = st.number_input("DEX risk alert >= ", 0.0, 100.0, float(rules["dex_max_risk"]), 1.0)
+            rules["dex_min_liquidity"] = st.number_input("DEX min liquidity", 0.0, 10_000_000.0, float(rules["dex_min_liquidity"]), 5_000.0)
+            rules["dex_min_h1_change"] = st.number_input("DEX pump 1h >=", -100.0, 1000.0, float(rules["dex_min_h1_change"]), 1.0)
+            rules["dex_dump_h1_change"] = st.number_input("DEX dump 1h <=", -100.0, 0.0, float(rules["dex_dump_h1_change"]), 1.0)
+            rules["dex_min_buy_ratio"] = st.slider("DEX buy ratio >=", 0.0, 1.0, float(rules["dex_min_buy_ratio"]), 0.01)
+            rules["cex_min_score"] = st.number_input("CEX min score", 0.0, 100.0, float(rules["cex_min_score"]), 1.0)
+            rules["cex_min_24h_change"] = st.number_input("CEX pump 24h >=", -100.0, 1000.0, float(rules["cex_min_24h_change"]), 1.0)
+            rules["cex_dump_24h_change"] = st.number_input("CEX dump 24h <=", -100.0, 0.0, float(rules["cex_dump_24h_change"]), 1.0)
+            if st.form_submit_button("Simpan Rules", width="stretch"):
+                save_alert_rules(rules)
+                st.success("Alert rules tersimpan.")
+
+    render_deploy_readiness_panel()
+
+    with st.expander("Backup / Restore Data Lokal", expanded=False):
+        backup_payload = build_local_backup_payload()
+        backup_bytes = json.dumps(backup_payload, ensure_ascii=False, indent=2).encode("utf-8")
+        b1, b2 = st.columns([1, 2])
+        with b1:
+            st.download_button(
+                "Export Backup JSON",
+                backup_bytes,
+                file_name=f"market_screener_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                width="stretch",
+            )
+        with b2:
+            uploaded_backup = st.file_uploader("Restore backup JSON", type=["json"], key="restore_backup_json")
+            merge_restore = st.checkbox("Merge dengan data sekarang", value=True)
+            if uploaded_backup is not None and st.button("Restore Backup", width="stretch"):
+                try:
+                    payload = json.loads(uploaded_backup.read().decode("utf-8"))
+                    restore_local_backup_payload(payload, merge=merge_restore)
+                    st.success("Backup berhasil direstore.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Restore gagal: {exc}")
+        st.caption("Di Streamlit Cloud, file lokal bisa hilang saat app restart/redeploy. Export backup sebelum deploy ulang kalau watchlist/history penting.")
+
+    if not items:
+        st.info("Watchlist masih kosong. Tambahkan coin dari Crypto Market atau pair dari Meme Coin Radar.")
+        return
+
+    st.subheader("Daftar Watchlist")
+    watch_df = pd.DataFrame(items)
+    show_cols = [c for c in ["type", "label", "source", "chain", "dex", "symbol", "pair_address", "added_at"] if c in watch_df.columns]
+    st.dataframe(watch_df[show_cols], width="stretch")
+
+    a1, a2, a3 = st.columns([1, 1, 2])
+    with a1:
+        run_security = st.checkbox("Security check saat refresh", value=False)
+    with a2:
+        if st.button("Refresh Watchlist", width="stretch"):
+            with st.spinner("Mengambil snapshot terbaru..."):
+                snapshot, alerts, saved_count = refresh_watchlist_snapshot(run_security=run_security)
+            st.session_state["watchlist_snapshot"] = snapshot
+            st.session_state["watchlist_alerts"] = alerts
+            st.success(f"{saved_count} snapshot tersimpan ke history.")
+    with a3:
+        remove_options = {item.get("label", item.get("id")): item.get("id") for item in items}
+        selected_remove = st.selectbox("Hapus item", ["-"] + list(remove_options.keys()))
+        if selected_remove != "-" and st.button("Hapus dari Watchlist", width="stretch"):
+            remove_watchlist_item(remove_options[selected_remove])
+            st.rerun()
+
+    snapshot = st.session_state.get("watchlist_snapshot")
+    alerts = st.session_state.get("watchlist_alerts")
+    if isinstance(snapshot, pd.DataFrame) and not snapshot.empty:
+        st.subheader("Snapshot Terbaru")
+        display = snapshot.copy()
+        for col in ["price", "score", "risk", "security", "volume", "change"]:
+            if col in display.columns:
+                display[col] = pd.to_numeric(display[col], errors="coerce")
+        st.dataframe(display, width="stretch")
+    else:
+        st.info("Klik Refresh Watchlist untuk menarik data terbaru dan menyimpan history.")
+
+    st.subheader("Alert Aktif")
+    if isinstance(alerts, pd.DataFrame) and not alerts.empty:
+        st.dataframe(alerts, width="stretch")
+    else:
+        st.caption("Belum ada alert aktif dari snapshot terakhir.")
+
+    st.subheader("History")
+    history = pd.DataFrame(load_history())
+    if history.empty:
+        st.info("History masih kosong.")
+        return
+    history["ts"] = pd.to_datetime(history["ts"], errors="coerce")
+    id_to_label = {item.get("id"): item.get("label", item.get("id")) for item in items}
+    labels = [id_to_label.get(item_id, item_id) for item_id in history["id"].dropna().unique()]
+    reverse = {id_to_label.get(item_id, item_id): item_id for item_id in history["id"].dropna().unique()}
+    selected_label = st.selectbox("Asset history", labels)
+    selected_id = reverse[selected_label]
+    h = history[history["id"] == selected_id].sort_values("ts").copy()
+    metric_cols = [c for c in ["score", "risk", "change"] if c in h.columns]
+    if metric_cols:
+        st.line_chart(h.set_index("ts")[metric_cols])
+    st.dataframe(h.sort_values("ts", ascending=False), width="stretch")
+
 # ── SCORING ──
 @st.cache_data(show_spinner=False)
 def load_table(uploaded_file):
@@ -549,6 +2442,43 @@ def compute_market_regime(index_df):
     return {"index_code":str(row["kode indeks"]),"index_change_pct":float(chg),"regime_score":rs,
             "regime_label":"Risk-On" if rs>=60 else "Netral" if rs>=45 else "Risk-Off"}
 
+# -- APP NAVIGATION --
+if "page" not in st.session_state:
+    st.session_state["page"] = "Home"
+
+if st.session_state["page"] not in APP_PAGES:
+    st.session_state["page"] = "Home"
+
+with st.sidebar:
+    st.header("Navigasi")
+    nav_choice = st.selectbox(
+        "Mode",
+        APP_PAGES,
+        index=APP_PAGES.index(st.session_state["page"]),
+        key=f"nav_mode_{st.session_state['page'].replace(' ', '_')}",
+    )
+    if nav_choice != st.session_state["page"]:
+        st.session_state["page"] = nav_choice
+        st.rerun()
+    st.markdown("---")
+
+if st.session_state["page"] == "Home":
+    render_home()
+    st.stop()
+
+if st.session_state["page"] == "Crypto Market":
+    render_crypto_market_page()
+    st.stop()
+
+if st.session_state["page"] == "Meme Coin Radar":
+    render_meme_coin_page()
+    st.stop()
+
+if st.session_state["page"] == "Watchlist & Alerts":
+    render_watchlist_page()
+    st.stop()
+
+
 # ── SIDEBAR UI ──
 st.title("BEI Screener v3 — Flow + Teknikal + AI")
 st.caption("Data BEI (upload) x TradingView real-time x OpenRouter AI narasi otomatis saat pilih saham.")
@@ -661,7 +2591,7 @@ disp=view[[c for c in dcols if c in view.columns]].rename(columns={
     "signal_label":"sinyal","trend_slope":"tren/hari","score_consistency":"konsistensi%"})
 num_cols=[c for c in ["signal","final_score"] if c in disp.columns]
 if num_cols: render_df_with_style_fallback(disp, num_cols)
-else: st.dataframe(disp,use_container_width=True)
+else: st.dataframe(disp,width="stretch")
 st.download_button("Export CSV",view.to_csv(index=False).encode("utf-8"),"bei_v3.csv","text/csv")
 
 if view.empty: st.warning("Tidak ada kandidat."); st.stop()

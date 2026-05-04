@@ -1,10 +1,23 @@
-# Saham BEI Screener v3
+# Market Screener
 
-Aplikasi ini menggabungkan:
+Aplikasi ini punya beberapa mode:
+
+1. Saham BEI
+2. Crypto Market
+3. Meme Coin Radar
+4. Watchlist & Alerts
+
+Mode Saham BEI menggabungkan:
 
 - Scoring BEI dari file upload (1-5 hari)
 - Data teknikal TradingView (scanner)
 - Narasi otomatis dengan OpenRouter (opsional, pakai API key)
+
+Mode Crypto Market memakai data gratis dari Binance Global public API dengan fallback CoinGecko public API.
+
+Mode Meme Coin Radar memakai data gratis dari DEX Screener search API untuk pair DEX, likuiditas, volume, umur pair, buy/sell pressure, dan risk score awal.
+
+Mode Watchlist & Alerts menyimpan kandidat crypto ke `data/`, refresh snapshot, menyimpan history score, dan menampilkan alert sederhana.
 
 ## Data yang dibutuhkan
 
@@ -29,9 +42,27 @@ Lalu buka di browser:
 http://localhost:8501
 ```
 
+Di halaman awal, pilih mode:
+
+- `Saham BEI` untuk workflow lama berbasis upload data BEI
+- `Crypto Market` untuk coin besar/altcoin listing exchange
+- `Meme Coin Radar` untuk screening awal meme coin/pair DEX
+- `Watchlist & Alerts` untuk memantau kandidat yang disimpan
+
 Untuk fitur AI narasi, isi OpenRouter API key di sidebar (didapat dari OpenRouter).
 
-Jika ingin tanpa ketik manual, set API key statis lewat secrets atau environment variable:
+Jika ingin tanpa ketik manual, set API key statis lewat `.env`, Streamlit secrets, atau environment variable.
+
+Opsi paling simpel untuk lokal adalah `.env`:
+
+```bash
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_MODEL=openrouter/auto
+```
+
+File `.env` sudah masuk `.gitignore`. Gunakan `.env.example` sebagai contoh format.
+
+Alternatif Streamlit secrets:
 
 ```toml
 # .streamlit/secrets.toml
@@ -39,7 +70,7 @@ OPENROUTER_API_KEY = "sk-or-v1-..."
 OPENROUTER_MODEL = "openrouter/auto"
 ```
 
-Atau via environment variable:
+Atau environment variable shell:
 
 ```bash
 export OPENROUTER_API_KEY="sk-or-v1-..."
@@ -47,6 +78,29 @@ export OPENROUTER_MODEL="openrouter/auto"
 ```
 
 Jika key statis tersedia, app otomatis memakainya di sidebar.
+
+## Deploy ke Streamlit Cloud
+
+Checklist sebelum deploy:
+
+1. Push file ini ke repo: `app.py`, `requirements.txt`, `.streamlit/config.toml`, `.streamlit/secrets.toml.example`, `.env.example`, dan README.
+2. Jangan push `.env`, `.streamlit/secrets.toml`, atau folder `data/`.
+3. Di Streamlit Cloud, pilih repo, branch, dan main file `app.py`.
+4. Isi Secrets di dashboard Streamlit:
+
+```toml
+OPENROUTER_API_KEY = "sk-or-v1-..."
+OPENROUTER_MODEL = "openrouter/auto"
+```
+
+5. Setelah app hidup, buka halaman `Home` lalu cek panel `Deploy Readiness`.
+6. Jika memakai Watchlist & Alerts, export backup JSON secara berkala dari halaman `Watchlist & Alerts`.
+
+Catatan penting deploy:
+
+- `.env` hanya untuk lokal. Streamlit Cloud memakai Secrets dashboard.
+- `data/` dipakai untuk watchlist/history lokal, tapi jangan dianggap database permanen di cloud.
+- Untuk penyimpanan permanen lintas redeploy, gunakan backup/restore JSON atau nanti sambungkan database eksternal seperti Supabase/Firebase.
 
 ## Catatan format
 
@@ -98,5 +152,10 @@ Kategori:
 ## Catatan penting
 
 - Data TradingView dan OpenRouter tergantung koneksi internet.
+- Data Crypto Market tergantung Binance Global atau CoinGecko public API.
+- Data Meme Coin Radar tergantung DEX Screener public API.
+- Security check memakai GoPlus untuk chain EVM, Honeypot.is untuk Ethereum/BSC/Base, dan RugCheck untuk Solana jika endpoint tersedia.
+- Watchlist, alert rules, dan history tersimpan lokal di folder `data/`.
 - Jika TradingView gagal diambil, app tetap jalan dengan analisis BEI saja.
 - Output AI bersifat asisten analisis, bukan rekomendasi investasi final.
+- Risk score meme coin belum menggantikan cek manual contract, holder, tax/honeypot, dan liquidity lock.
