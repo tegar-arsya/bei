@@ -9,17 +9,22 @@ Aplikasi ini punya beberapa mode:
 
 Mode Saham BEI menggabungkan:
 
-- Scoring BEI dari file upload (1-5 hari)
-- Data teknikal TradingView (scanner)
+- Auto scanner TradingView untuk saham IDX tanpa upload file
+- Upload BEI advanced untuk foreign flow dan broker summary (1-5 hari)
+- Data teknikal TradingView (scanner/chart)
 - Narasi otomatis dengan OpenRouter (opsional, pakai API key)
 
-Mode Crypto Market memakai data gratis dari Indodax public API untuk pair crypto IDR yang tersedia di market Indonesia. CoinGecko IDR tersedia sebagai pembanding harga Rupiah global, bukan bukti listing lokal. Detail coin terpilih punya tab `Outlook` untuk forward score, range 24h, scenario map, dan checklist praktis.
+Mode Crypto Market memakai data gratis dari Indodax public API untuk pair crypto IDR yang tersedia di market Indonesia. CoinGecko IDR tersedia sebagai pembanding harga Rupiah global, bukan bukti listing lokal. Detail coin terpilih punya tab `Outlook`, chart TradingView, data OHLCV/indikator chart untuk AI, news, dan community check.
 
-Mode Meme Coin Radar menampilkan meme coin yang punya pair IDR di Indodax, seperti DOGE, SHIB, PEPE, FLOKI, BONK, WIF, dan sejenisnya jika tersedia. Modul ini tidak memakai pair DEX global.
+Mode Meme Coin Radar menampilkan meme coin yang punya pair IDR di Indodax, seperti DOGE, SHIB, PEPE, FLOKI, BONK, WIF, dan sejenisnya jika tersedia. Modul ini tidak memakai pair DEX global. AI membaca market IDR, OHLCV chart Indodax, berita terbaru, dan ukuran komunitas jika metadata CoinGecko tersedia.
 
-Mode Watchlist & Alerts menyimpan kandidat crypto ke `data/`, refresh snapshot, menyimpan history score, dan menampilkan alert sederhana.
+Mode Watchlist & Alerts menyimpan kandidat saham IDX dan crypto IDR ke `data/`, refresh snapshot, menyimpan history score, dan menampilkan alert sederhana.
 
 ## Data yang dibutuhkan
+
+Mode Saham BEI default tidak membutuhkan upload file karena memakai TradingView scanner otomatis.
+
+Untuk mode `Upload BEI Advanced`, siapkan:
 
 1. Ringkasan saham
 2. Ringkasan broker
@@ -44,10 +49,10 @@ http://localhost:8501
 
 Di halaman awal, pilih mode:
 
-- `Saham BEI` untuk workflow lama berbasis upload data BEI
+- `Saham BEI` untuk auto scanner saham IDX tanpa upload, plus upload BEI advanced
 - `Crypto Market` untuk coin besar/altcoin dengan pair IDR di Indonesia
 - `Meme Coin Radar` untuk meme coin dengan pair IDR di Indonesia
-- `Watchlist & Alerts` untuk memantau kandidat yang disimpan
+- `Watchlist & Alerts` untuk memantau kandidat saham/crypto yang disimpan
 
 Untuk fitur AI narasi, isi OpenRouter API key di sidebar (didapat dari OpenRouter).
 
@@ -152,8 +157,11 @@ Kategori:
 ## Catatan penting
 
 - Data TradingView dan OpenRouter tergantung koneksi internet.
+- Auto scanner saham tidak membaca net foreign dan broker summary. Gunakan `Upload BEI Advanced` jika butuh flow detail.
 - Data Crypto Market dan Meme Coin Radar tergantung Indodax public API. CoinGecko IDR hanya pembanding harga Rupiah global.
+- News memakai Google News RSS, sedangkan community check memakai metadata CoinGecko jika coin punya `coingecko_id`.
 - Watchlist, alert rules, dan history tersimpan lokal di folder `data/`.
-- Jika TradingView gagal diambil, app tetap jalan dengan analisis BEI saja.
+- Watchlist saham bisa memberi alert score, perubahan harian, dan relative volume dari snapshot TradingView.
+- Jika TradingView gagal diambil, mode auto saham tidak bisa refresh; mode upload BEI tetap bisa dipakai.
 - Output AI bersifat asisten analisis, bukan rekomendasi investasi final.
 - Meme coin tetap sangat spekulatif walaupun sudah punya pair IDR.
