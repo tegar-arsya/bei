@@ -1,123 +1,166 @@
-# Market Screener
+# BEI Stock Screener
 
-Aplikasi ini punya beberapa mode:
+Aplikasi Streamlit khusus untuk screening dan analisis saham BEI.
 
-1. Saham BEI
-2. Crypto Market
-3. Meme Coin Radar
-4. Watchlist & Alerts
+## Flow aplikasi
 
-Mode Saham BEI menggabungkan:
+~~~text
+TradingView scanner / upload BEI
+            ↓
+Normalisasi data
+            ↓
+Indikator dan scoring
+            ↓
+Filter kandidat saham
+            ↓
+Chart, teknikal, flow, broker, dan AI
+            ↓
+Watchlist, history, dan alert saham
+~~~
 
-- Auto scanner TradingView untuk saham IDX tanpa upload file
-- Upload BEI advanced untuk foreign flow dan broker summary (1-5 hari)
-- Data teknikal TradingView (scanner/chart)
-- Narasi otomatis dengan OpenRouter (opsional, pakai API key)
+## Mode yang tersedia
 
-Mode Crypto Market memakai data gratis dari Indodax public API untuk pair crypto IDR yang tersedia di market Indonesia. CoinGecko IDR tersedia sebagai pembanding harga Rupiah global, bukan bukti listing lokal. Detail coin terpilih punya tab `Outlook`, chart TradingView, data OHLCV/indikator chart untuk AI, news, dan community check.
+1. Auto TradingView
+   - Scan saham IDX tanpa upload file.
+   - Mengambil harga, volume, value traded, market cap, RSI, MACD, EMA, Bollinger, ADX, relative volume, performa mingguan/bulanan, dan rekomendasi TradingView.
+   - Jika `GOAPI_API_KEY` tersedia, quote, historical OHLC, dan broker summary saham terpilih diambil dari GOAPI untuk quant engine dan AI; TradingView tetap menjadi chart interaktif.
+   - Foreign flow dan order book tidak tersedia; broker summary hanya tersedia jika endpoint GOAPI trial Anda mengizinkannya.
+   - Hasil scanner dapat diunduh sebagai Excel dengan seluruh row/kolom, header freeze, dan filter.
 
-Mode Meme Coin Radar menampilkan meme coin yang punya pair IDR di Indodax, seperti DOGE, SHIB, PEPE, FLOKI, BONK, WIF, dan sejenisnya jika tersedia. Modul ini tidak memakai pair DEX global. AI membaca market IDR, OHLCV chart Indodax, berita terbaru, dan ukuran komunitas jika metadata CoinGecko tersedia.
+2. Upload BEI Advanced
+   - Upload data BEI untuk foreign flow, bid-offer pressure, broker activity, market activity, dan analisis 1-5 hari.
+   - Ringkasan indeks dapat digunakan untuk menghitung market regime.
 
-Mode Watchlist & Alerts menyimpan kandidat saham IDX dan crypto IDR ke `data/`, refresh snapshot, menyimpan history score, dan menampilkan alert sederhana.
-
-## Data yang dibutuhkan
-
-Mode Saham BEI default tidak membutuhkan upload file karena memakai TradingView scanner otomatis.
-
-Untuk mode `Upload BEI Advanced`, siapkan:
-
-1. Ringkasan saham
-2. Ringkasan broker
-3. Ringkasan perdagangan dan rekapitulasi
-4. Daftar saham
-5. (Opsional) Ringkasan indeks
-
-Format file: `xlsx`, `xls`, atau `csv`.
+3. Watchlist & Alerts
+   - Menyimpan saham pilihan ke folder data/.
+   - Refresh snapshot saham dari TradingView.
+   - Menyimpan history score.
+   - Menampilkan alert score, perubahan harga, relative volume, dan breakout candidate.
+   - Memiliki backup/restore JSON.
 
 ## Menjalankan aplikasi
 
-```bash
-python3 -m pip install --user -r requirements.txt
-python3 -m streamlit run app.py
-```
+~~~bash
+source venv/bin/activate
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+~~~
 
-Lalu buka di browser:
+Jika environment belum ada:
 
-```bash
+~~~bash
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+~~~
+
+Buka:
+
+~~~text
 http://localhost:8501
-```
+~~~
 
-Di halaman awal, pilih mode:
+## AI opsional
 
-- `Saham BEI` untuk auto scanner saham IDX tanpa upload, plus upload BEI advanced
-- `Crypto Market` untuk coin besar/altcoin dengan pair IDR di Indonesia
-- `Meme Coin Radar` untuk meme coin dengan pair IDR di Indonesia
-- `Watchlist & Alerts` untuk memantau kandidat saham/crypto yang disimpan
+AI memakai OpenRouter. Key dapat dimasukkan dari sidebar atau diset melalui .env:
 
-Untuk fitur AI narasi, isi OpenRouter API key di sidebar (didapat dari OpenRouter).
-
-Jika ingin tanpa ketik manual, set API key statis lewat `.env`, Streamlit secrets, atau environment variable.
-
-Opsi paling simpel untuk lokal adalah `.env`:
-
-```bash
+~~~bash
 OPENROUTER_API_KEY=sk-or-v1-...
 OPENROUTER_MODEL=openrouter/auto
-```
+~~~
 
-File `.env` sudah masuk `.gitignore`. Gunakan `.env.example` sebagai contoh format.
+Pada Upload BEI Advanced, AI menerima data BEI dan snapshot indikator TradingView,
+lalu meminta respons `json_schema`. Respons divalidasi sebelum ditampilkan sebagai
+kartu, skenario, level, drawing, dan AI Quant Chart. Bagian `AI Analisis` juga
+menampilkan chart candlestick berbasis OHLC, volume, EMA, support/resistance,
+Fibonacci, level eksekusi, serta drawing AI yang tervalidasi. Tersedia juga
+download detail analisis ke Excel dengan sheet ringkasan, quant indicators,
+levels, scenarios, evidence, drawings, dan data chart.
+
+Perhitungan quant dan integrasi AI dipisahkan dari `app.py`:
+
+- `analytics/quant.py`: indikator, swing, Fibonacci, support/resistance, dan level proxy.
+- `analytics/chart.py`: Plotly candlestick, volume, EMA, level, dan drawing tervalidasi.
+- `analytics/ai.py`: system prompt profesional dan OpenRouter structured output.
+- `analytics/validator.py`: menolak drawing atau level yang tidak konsisten dengan OHLC.
+- `storage/persistence.py`: menyimpan hasil ke JSON lokal dan opsional mirror ke Supabase.
+
+Supabase tidak wajib untuk menjalankan aplikasi. Jika `SUPABASE_URL` dan key sudah
+diisi, hasil analisis dicoba disimpan ke tabel `ai_analyses`; kegagalan Supabase tidak
+menghentikan analisis lokal. Modul ini tidak menghapus atau mengubah tabel lama.
+
+## Supabase untuk upload BEI
+
+1. Jalankan `supabase/migrations/20260723_bei_streamlit_imports.sql` di Supabase SQL Editor.
+   Jika tabel sudah terlanjur dibuat tetapi muncul `permission denied`, jalankan juga
+   `supabase/migrations/20260723_bei_streamlit_imports_permissions.sql`.
+2. Isi `SUPABASE_URL` dan server-only `SUPABASE_SERVICE_ROLE_KEY` atau `SUPABASE_SECRET_KEY`.
+3. Pastikan bucket private `saham` tersedia; migrasi akan membuatnya jika belum ada.
+4. Di halaman Upload BEI Advanced, pilih tanggal terlebih dahulu lalu upload Ringkasan Saham,
+   Ringkasan Broker, Ringkasan Perdagangan, dan Daftar Saham.
+5. Klik `Simpan batch upload ke Supabase`.
+
+Satu tanggal adalah satu batch. Upload ulang pada tanggal yang sama akan mengganti baris
+untuk tanggal tersebut dan meng-upsert file di bucket `saham`; tanggal lain tidak disentuh.
+Gunakan service-role/secret key hanya di server atau Streamlit Secrets, jangan di frontend.
+
+Jika sudah ada data tersimpan, halaman Advanced otomatis menawarkan mode `Database Supabase`.
+Pilih satu sampai lima tanggal dari database untuk menjalankan scoring tanpa upload ulang file.
+Mode `Upload file baru` tetap tersedia untuk menambah atau memperbarui batch.
 
 Alternatif Streamlit secrets:
 
-```toml
-# .streamlit/secrets.toml
+~~~toml
 OPENROUTER_API_KEY = "sk-or-v1-..."
 OPENROUTER_MODEL = "openrouter/auto"
-```
+~~~
 
-Atau environment variable shell:
+## GOAPI IDX (opsional)
 
-```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."
-export OPENROUTER_MODEL="openrouter/auto"
-```
+Tambahkan di `.streamlit/secrets.toml` atau environment server:
 
-Jika key statis tersedia, app otomatis memakainya di sidebar.
+~~~toml
+GOAPI_API_KEY = "API_KEY_GOAPI_ANDA"
+GOAPI_BASE_URL = "https://api.goapi.io"
+~~~
 
-## Deploy ke Streamlit Cloud
+Key dibaca server-side melalui header `X-API-KEY` dan tidak dikirim ke browser. Mode Auto tetap berjalan dengan
+TradingView jika GOAPI belum diatur atau trial sedang tidak memiliki akses. GOAPI
+digunakan untuk quote, historical OHLC, dan perhitungan quant pada saham terpilih;
+chart tetap memakai TradingView agar drawing dan Fibonacci tersedia.
 
-Checklist sebelum deploy:
+## Upload BEI Advanced
 
-1. Push file ini ke repo: `app.py`, `requirements.txt`, `.streamlit/config.toml`, `.streamlit/secrets.toml.example`, `.env.example`, dan README.
-2. Jangan push `.env`, `.streamlit/secrets.toml`, atau folder `data/`.
-3. Di Streamlit Cloud, pilih repo, branch, dan main file `app.py`.
-4. Isi Secrets di dashboard Streamlit:
+Untuk setiap hari, siapkan:
 
-```toml
-OPENROUTER_API_KEY = "sk-or-v1-..."
-OPENROUTER_MODEL = "openrouter/auto"
-```
+1. Ringkasan saham
+2. Ringkasan broker
+3. Ringkasan perdagangan
+4. Daftar saham
+5. Ringkasan indeks (opsional)
 
-5. Setelah app hidup, buka halaman `Home` lalu cek panel `Deploy Readiness`.
-6. Jika memakai Watchlist & Alerts, export backup JSON secara berkala dari halaman `Watchlist & Alerts`.
+Format file yang didukung: xlsx, xls, dan csv.
 
-Catatan penting deploy:
+Format utama Daftar Saham:
 
-- `.env` hanya untuk lokal. Streamlit Cloud memakai Secrets dashboard.
-- `data/` dipakai untuk watchlist/history lokal, tapi jangan dianggap database permanen di cloud.
-- Untuk penyimpanan permanen lintas redeploy, gunakan backup/restore JSON atau nanti sambungkan database eksternal seperti Supabase/Firebase.
+- Kode
+- Nama Perusahaan
+- Tanggal Pencatatan
+- Saham
+- Papan Pencatatan
 
-## Catatan format
+Format alternatif:
 
-- `Ringkasan Saham` mengikuti kolom IDX harian.
-- `Ringkasan Broker` dipakai sebagai komponen broker activity. Jika kode broker tidak map ke ticker, skornya dibuat netral.
-- `Daftar Saham` mendukung dua format:
-  - Utama: `Kode`, `Nama Perusahaan`, `Tanggal Pencatatan`, `Saham`, `Papan Pencatatan`
-  - Alternatif: `ID Instrument`, `ID Board`, `Volume`, `Nilai`, `Frekuensi`
+- ID Instrument
+- ID Board
+- Volume
+- Nilai
+- Frekuensi
 
-## Formula skor inti
+## Formula scoring Advanced
 
-Final score menggunakan bobot yang bisa diubah di sidebar, default:
+Default bobot:
 
 - Momentum: 25%
 - Likuiditas: 20%
@@ -127,41 +170,39 @@ Final score menggunakan bobot yang bisa diubah di sidebar, default:
 - Price Structure: 5%
 - Broker: 5%
 
-Jika `Ringkasan Indeks` diupload:
+Jika ringkasan indeks diupload:
 
-- Sistem menghitung `Regime Score` market (Risk-On / Netral / Risk-Off)
-- Penyesuaian akhir: `Final Score Adjusted = 0.90 * Final Score + 0.10 * Regime Score`
+~~~text
+Final Score Adjusted = 0.90 × Final Score + 0.10 × Regime Score
+~~~
 
-Format minimum `Ringkasan Indeks`:
+Kategori score:
 
-- `No`
-- `Kode Indeks`
-- `Sebelumnya`
-- `Tertinggi`
-- `Terendah`
-- `Penutupan`
-- `Selisih`
-- `Volume`
-- `Nilai`
-- `Frekuensi`
+- Rendah
+- Menarik
+- Tinggi
+- Sangat Tinggi
 
-Kolom lain seperti `# Stock` dan `Kapitalisasi Pasar*` boleh ada (opsional).
+## Penyimpanan lokal
 
-Kategori:
+File runtime dibuat di folder data/:
 
-- `Rendah`
-- `Menarik`
-- `Tinggi`
-- `Sangat Tinggi`
+- stock_watchlist.json
+- stock_history.json
+- stock_alert_rules.json
 
-## Catatan penting
+Untuk Streamlit Cloud, storage lokal tidak permanen. Gunakan fitur backup/restore sebelum redeploy. Pada VPS, mount folder data/ sebagai Docker volume.
 
-- Data TradingView dan OpenRouter tergantung koneksi internet.
-- Auto scanner saham tidak membaca net foreign dan broker summary. Gunakan `Upload BEI Advanced` jika butuh flow detail.
-- Data Crypto Market dan Meme Coin Radar tergantung Indodax public API. CoinGecko IDR hanya pembanding harga Rupiah global.
-- News memakai Google News RSS, sedangkan community check memakai metadata CoinGecko jika coin punya `coingecko_id`.
-- Watchlist, alert rules, dan history tersimpan lokal di folder `data/`.
-- Watchlist saham bisa memberi alert score, perubahan harian, dan relative volume dari snapshot TradingView.
-- Jika TradingView gagal diambil, mode auto saham tidak bisa refresh; mode upload BEI tetap bisa dipakai.
-- Output AI bersifat asisten analisis, bukan rekomendasi investasi final.
-- Meme coin tetap sangat spekulatif walaupun sudah punya pair IDR.
+## Deploy
+
+1. Siapkan app.py, requirements.txt, .streamlit/config.toml, .env.example, dan README.
+2. Jangan commit .env, .streamlit/secrets.toml, atau folder data/.
+3. Isi OPENROUTER_API_KEY dan OPENROUTER_MODEL melalui Secrets jika memakai Streamlit Cloud.
+4. Jika memakai Docker/VPS, pastikan folder data/ dipersistenkan dengan volume.
+
+## Catatan
+
+- Endpoint scanner TradingView adalah endpoint publik dan dapat berubah atau terkena rate limit.
+- Chart, financials, technical analysis, dan news ditampilkan melalui widget TradingView.
+- Aplikasi tidak mengirim order ke broker.
+- Output AI adalah alat bantu analisis, bukan rekomendasi investasi final.

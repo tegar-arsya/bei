@@ -1,36 +1,45 @@
-# Streamlit Deployment Checklist
+# Streamlit Deployment Checklist — BEI Stock Screener
 
 ## Required files
 
-- `app.py`
-- `requirements.txt`
-- `.streamlit/config.toml`
-- `.streamlit/secrets.toml.example`
-- `.env.example`
-- `README.md`
+- app.py
+- requirements.txt
+- .streamlit/config.toml
+- .streamlit/secrets.toml.example
+- .env.example
+- README.md
 
 ## Do not commit
 
-- `.env`
-- `.streamlit/secrets.toml`
-- `data/`
+- .env
+- .streamlit/secrets.toml
+- data/
 
 ## Streamlit Cloud secrets
 
-Add these in the Streamlit Cloud app settings:
-
-```toml
+~~~toml
 OPENROUTER_API_KEY = "sk-or-v1-..."
 OPENROUTER_MODEL = "openrouter/auto"
-```
+~~~
 
 ## Data persistence
 
-The app stores watchlist, alert rules, and history in local JSON files under `data/`.
-This is fine for local use, but cloud filesystem storage should not be treated as permanent.
+Watchlist saham, alert rules, dan history disimpan sebagai JSON di folder data/.
 
-Before redeploying or restarting a cloud app, use:
+Untuk VPS/Docker, gunakan volume persisten, misalnya:
 
-`Watchlist & Alerts` -> `Backup / Restore Data Lokal` -> `Export Backup JSON`
+~~~yaml
+volumes:
+  - ./data:/app/data
+~~~
 
-To restore, upload the JSON backup from the same panel.
+Untuk Streamlit Cloud, filesystem tidak boleh dianggap database permanen. Gunakan Watchlist & Alerts lalu Backup / Restore Data Saham sebelum redeploy.
+
+## Cek setelah deploy
+
+1. Buka halaman Home.
+2. Buka panel Deploy Readiness.
+3. Pastikan folder data/ dapat ditulis.
+4. Uji Auto TradingView.
+5. Uji Upload BEI Advanced dengan satu set file.
+6. Uji export backup watchlist.
