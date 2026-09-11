@@ -26,7 +26,7 @@ def validate_analysis(analysis: dict[str, Any], ticker: str, history: pd.DataFra
     warnings: list[str] = []
     target = str(ticker).upper().strip()
     if str(result.get("ticker", "")).upper().strip() != target:
-        raise ValueError("Ticker pada respons AI tidak sesuai dengan saham yang dipilih.")
+        raise ValueError("Ticker pada respons AI tidak sesuai dengan asset yang dipilih.")
 
     close_values = pd.to_numeric(history.get("close", pd.Series(dtype=float)), errors="coerce") if isinstance(history, pd.DataFrame) else pd.Series(dtype=float)
     low = float(pd.to_numeric(history.get("low", close_values), errors="coerce").min()) if not history.empty else 0.0
